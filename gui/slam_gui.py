@@ -619,11 +619,15 @@ class SLAM_GUI:
             self.g_camera.target = frustum.center.astype(np.float32)
             self.g_camera.up = frustum.up.astype(np.float32)
 
-            self.gaussians_gl.xyz = self.gaussian_cur.get_xyz.cpu().numpy()
-            self.gaussians_gl.opacity = self.gaussian_cur.get_opacity.cpu().numpy()
-            self.gaussians_gl.scale = self.gaussian_cur.get_scaling.cpu().numpy()
-            self.gaussians_gl.rot = self.gaussian_cur.get_rotation.cpu().numpy()
-            self.gaussians_gl.sh = self.gaussian_cur.get_features.cpu().numpy()[:, 0, :]
+            self.gaussians_gl.xyz = self.gaussian_cur.get_xyz.detach().cpu().numpy()
+            self.gaussians_gl.opacity = self.gaussian_cur.get_opacity.detach().cpu().numpy()
+            self.gaussians_gl.sh = self.gaussian_cur.get_features.detach().cpu().numpy()[:, 0, :]
+            self.gaussians_gl.rot = self.gaussian_cur.get_rotation.detach().cpu().numpy()
+
+            raw_scales = self.gaussian_cur.get_scaling.detach().cpu().numpy()
+            scales_2d = raw_scales[:, :2]
+            z_scale = np.ones((scales_2d.shape[0], 1)) * 1e-3
+            self.gaussians_gl.scale = np.concatenate([scales_2d, z_scale], axis=-1).astype(np.float32)
 
             self.update_activated_renderer_state(self.gaussians_gl)
             self.g_renderer.sort_and_update(self.g_camera)
