@@ -5,11 +5,6 @@ import numpy as np
 import open3d as o3d
 import torch
 
-from gaussian_splatting.utils.general_utils import (
-    build_scaling_rotation,
-    strip_symmetric,
-)
-
 cv_gl = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
 
 
@@ -98,8 +93,6 @@ class GaussianPacket:
             self.max_sh_degree = gaussians.max_sh_degree
             self.get_features = gaussians.get_features.detach().clone()
 
-            self._rotation = gaussians._rotation.detach().clone()
-            self.rotation_activation = torch.nn.functional.normalize
             self.unique_kfIDs = gaussians.unique_kfIDs.clone()
             self.n_obs = gaussians.n_obs.clone()
 
@@ -126,19 +119,6 @@ class GaussianPacket:
             img.unsqueeze(0), size=(height, width), mode="bilinear", align_corners=False
         )
         return img.squeeze(0)
-
-    def get_covariance(self, scaling_modifier=1):
-        return self.build_covariance_from_scaling_rotation(
-            self.get_scaling, scaling_modifier, self._rotation
-        )
-
-    def build_covariance_from_scaling_rotation(
-        self, scaling, scaling_modifier, rotation
-    ):
-        L = build_scaling_rotation(scaling_modifier * scaling, rotation)
-        actual_covariance = L @ L.transpose(1, 2)
-        symm = strip_symmetric(actual_covariance)
-        return symm
 
 
 def get_latest_queue(q):

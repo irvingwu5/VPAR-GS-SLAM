@@ -20,11 +20,10 @@ from torch import nn
 
 from gaussian_splatting.utils.general_utils import (
     build_rotation,
-    build_scaling_rotation,
     get_expon_lr_func,
     helper,
     inverse_sigmoid,
-    strip_symmetric,
+    normal2rotation,
 )
 from gaussian_splatting.utils.graphics_utils import BasicPointCloud, getWorld2View2
 from gaussian_splatting.utils.sh_utils import RGB2SH
@@ -53,8 +52,6 @@ class GaussianModel:
         self.scaling_activation = torch.exp
         self.scaling_inverse_activation = torch.log
 
-        self.covariance_activation = self.build_covariance_from_scaling_rotation
-
         self.opacity_activation = torch.sigmoid
         self.inverse_opacity_activation = inverse_sigmoid
 
@@ -62,16 +59,6 @@ class GaussianModel:
 
         self.config = config
         self.ply_input = None
-
-        self.isotropic = False
-
-    def build_covariance_from_scaling_rotation(
-        self, scaling, scaling_modifier, rotation
-    ):
-        L = build_scaling_rotation(scaling_modifier * scaling, rotation)
-        actual_covariance = L @ L.transpose(1, 2)
-        symm = strip_symmetric(actual_covariance)
-        return symm
 
     @property
     def get_scaling(self):
@@ -94,11 +81,6 @@ class GaussianModel:
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
-
-    def get_covariance(self, scaling_modifier=1):
-        return self.covariance_activation(
-            self.get_scaling, scaling_modifier, self._rotation
-        )
 
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
@@ -165,8 +147,15 @@ class GaussianModel:
         new_xyz = np.asarray(pcd_tmp.points)
         new_rgb = np.asarray(pcd_tmp.colors)
 
+        pcd_tmp.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(
+                radius=0.1, max_nn=30
+            )
+        )
+        new_normals = np.asarray(pcd_tmp.normals)
+
         pcd = BasicPointCloud(
-            points=new_xyz, colors=new_rgb, normals=np.zeros((new_xyz.shape[0], 3))
+            points=new_xyz, colors=new_rgb, normals=new_normals
         )
         self.ply_input = pcd
 
@@ -187,12 +176,11 @@ class GaussianModel:
             )
             * point_size
         )
-        scales = torch.log(torch.sqrt(dist2))[..., None]
-        if not self.isotropic:
-            scales = scales.repeat(1, 3)
+        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 2)
 
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
-        rots[:, 0] = 1
+        rots = normal2rotation(
+            torch.from_numpy(new_normals).float().cuda()
+        )
         opacities = inverse_sigmoid(
             0.5
             * torch.ones(
@@ -603,7 +591,8 @@ class GaussianModel:
         )
 
         stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
-        means = torch.zeros((stds.size(0), 3), device="cuda")
+        stds = torch.cat([stds, torch.zeros_like(stds[:, :1])], dim=-1)
+        means = torch.zeros_like(stds)
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[

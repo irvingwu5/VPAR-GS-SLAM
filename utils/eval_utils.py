@@ -1,11 +1,16 @@
 import json
 import os
 
+import warnings
+
 import cv2
 import evo
 import numpy as np
 import torch
 from evo.core import metrics, trajectory
+
+warnings.filterwarnings("ignore", message=".*pretrained.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*weights.*deprecated.*")
 from evo.core.metrics import PoseRelation, Unit
 from evo.core.trajectory import PosePath3D, PoseTrajectory3D
 from evo.tools import plot
@@ -61,6 +66,7 @@ def evaluate_evo(poses_gt, poses_est, plot_dir, label, monocular=False):
     )
     ax.legend()
     plt.savefig(os.path.join(plot_dir, "evo_2dplot_{}.png".format(str(label))), dpi=90)
+    plt.close(fig)
 
     return ape_stat
 

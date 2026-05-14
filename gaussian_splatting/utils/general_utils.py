@@ -178,3 +178,30 @@ def safe_state(silent):
     np.random.seed(0)
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
+
+
+def rotmat2quaternion(R, normalize=False):
+    tr = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2] + 1e-6
+    r = torch.sqrt(1 + tr) / 2
+    q = torch.stack([
+        r,
+        (R[:, 2, 1] - R[:, 1, 2]) / (4 * r),
+        (R[:, 0, 2] - R[:, 2, 0]) / (4 * r),
+        (R[:, 1, 0] - R[:, 0, 1]) / (4 * r)
+    ], -1)
+    if normalize:
+        q = torch.nn.functional.normalize(q, dim=-1)
+    return q
+
+
+def normal2rotation(n):
+    n = torch.nn.functional.normalize(n)
+    w0 = torch.tensor([[1, 0, 0]]).expand(n.shape).to(n.device)
+    R0 = w0 - torch.sum(w0 * n, -1, True) * n
+    R0 *= torch.sign(R0[:, :1])
+    R0 = torch.nn.functional.normalize(R0)
+    R1 = torch.linalg.cross(n, R0)
+    R1 *= torch.sign(R1[:, 1:2]) * torch.sign(n[:, 2:])
+    R = torch.stack([R0, R1, n], -1)
+    q = rotmat2quaternion(R)
+    return q

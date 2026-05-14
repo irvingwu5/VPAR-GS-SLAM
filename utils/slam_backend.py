@@ -226,9 +226,6 @@ class BackEnd(mp.Process):
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)
 
-            scaling = self.gaussians.get_scaling
-            isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1))
-            loss_mapping += 10 * isotropic_loss.mean()
             loss_mapping.backward()
             gaussian_split = False
             ## Deinsifying / Pruning Gaussians
