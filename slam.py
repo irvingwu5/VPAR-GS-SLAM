@@ -185,13 +185,12 @@ class SLAM:
         Log("Total time", start.elapsed_time(end) * 0.001, tag="Eval")
         Log("Total FPS", N_frames / (start.elapsed_time(end) * 0.001), tag="Eval")
 
+        # Use frontend gaussians (updated by backend mapping), not the init-time empty shell
+        self.gaussians = self.frontend.gaussians
         num_gaussians = self.gaussians.get_xyz.shape[0]
         Log(f"Number of Gaussians: {num_gaussians}", tag="Eval")
-        algo_peak_mb = torch.cuda.max_memory_allocated(device="cuda") / (1024 * 1024)
-        Log(f"Peak GPU Memory (PyTorch alloc): {algo_peak_mb:.2f} MB", tag="Eval")
 
         if self.eval_rendering:
-            self.gaussians = self.frontend.gaussians
             kf_indices = self.frontend.kf_indices
             ATE = eval_ate(
                 self.frontend.cameras,
