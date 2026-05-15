@@ -22,7 +22,9 @@ def _dpvo_process(cfg, weight_path, ht, wd, device_id, cmd_queue, result_queue):
                     slam.terminate()
                 break
             elif msg[0] == "track":
-                frame_id, image, intrinsics = msg[1:]
+                frame_id, image_cpu, K_cpu = msg[1:]
+                image = image_cpu.cuda(device_id)
+                intrinsics = K_cpu.cuda(device_id)
                 if slam is None:
                     slam = DPVO(cfg, weight_path, ht=ht, wd=wd, viz=False)
 
@@ -108,11 +110,12 @@ class DPVOProvider:
             est_c2w: (4, 4) numpy float64, estimated current C2W (metric scale)
             info:    dict with keys "flow_quality", optionally "error"
         """
-        image = torch.from_numpy(rgb_uint8_np.copy()).permute(2, 0, 1).cuda(self._dpvo_device)
-        intrinsics = torch.tensor([self.fx, self.fy, self.cx, self.cy],
-                                  dtype=torch.float32, device=f"cuda:{self._dpvo_device}")
+        # Send CPU tensors to avoid CUDA IPC memory accumulation
+        image_cpu = torch.from_numpy(rgb_uint8_np.copy()).permute(2, 0, 1)  # (3, H, W) uint8 CPU
+        K_cpu = torch.tensor([self.fx, self.fy, self.cx, self.cy],
+                             dtype=torch.float32)  # (4,) float32 CPU
 
-        self.cmd_queue.put(("track", self._frame_counter, image, intrinsics))
+        self.cmd_queue.put(("track", self._frame_counter, image_cpu, K_cpu))
         self._frame_counter += 1
 
         timeout = self.config["VOPrior"].get("dpvo_queue_timeout", 0.5)
