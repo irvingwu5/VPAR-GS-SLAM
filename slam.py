@@ -25,45 +25,104 @@ from utils.slam_frontend import FrontEnd
 
 
 class GPUMemoryMonitor:
-    """Background thread that polls nvidia-smi to track peak physical GPU memory."""
+    """Background thread that tracks peak physical GPU memory across all processes.
+
+    Uses pynvml if available (more reliable), falls back to nvidia-smi CLI.
+    Polls every 2s; subtracts baseline (measured before SLAM starts) to report
+    net usage excluding pre-existing allocations.
+    """
 
     def __init__(self, physical_gpu_id=0):
         self.keep_measuring = True
         self.peak_memory = 0
         self.baseline_memory = 0
         self.physical_gpu_id = physical_gpu_id
+        self._backend = None  # "pynvml" or "nvidia-smi" or None
+        self._nvml_handle = None
         self.thread = threading.Thread(target=self._measure_usage, daemon=True)
 
-    def _query_gpu_mem(self):
+        if self._try_init_pynvml():
+            self._backend = "pynvml"
+            Log(f"[GPU Mem] Using pynvml backend (GPU {physical_gpu_id})")
+        elif self._check_nvidia_smi():
+            self._backend = "nvidia-smi"
+            Log(f"[GPU Mem] Using nvidia-smi backend (GPU {physical_gpu_id})")
+        else:
+            self._backend = None
+            Log("[GPU Mem] WARNING: No GPU monitoring backend available. "
+                "Install pynvml or ensure nvidia-smi is on PATH.")
+
+    def _try_init_pynvml(self):
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(self.physical_gpu_id)
+            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            pynvml.nvmlShutdown()
+            self._pynvml_available = True
+            return True
+        except Exception:
+            self._pynvml_available = False
+            return False
+
+    def _check_nvidia_smi(self):
+        try:
+            subprocess.check_output(
+                ['nvidia-smi', f'--id={self.physical_gpu_id}',
+                 '--query-gpu=memory.used', '--format=csv,nounits,noheader'],
+                encoding='utf-8', stderr=subprocess.DEVNULL)
+            return True
+        except Exception:
+            return False
+
+    def _query_gpu_mem_pynvml(self):
+        import pynvml
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(self.physical_gpu_id)
+        info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        pynvml.nvmlShutdown()
+        return info.used // (1024 * 1024)  # bytes -> MB
+
+    def _query_gpu_mem_nvsmi(self):
         result = subprocess.check_output(
-            [
-                'nvidia-smi', f'--id={self.physical_gpu_id}',
-                '--query-gpu=memory.used',
-                '--format=csv,nounits,noheader'
-            ], encoding='utf-8')
+            ['nvidia-smi', f'--id={self.physical_gpu_id}',
+             '--query-gpu=memory.used', '--format=csv,nounits,noheader'],
+            encoding='utf-8')
         return int(result.strip())
 
     def _measure_usage(self):
+        query = (self._query_gpu_mem_pynvml if self._backend == "pynvml"
+                 else self._query_gpu_mem_nvsmi)
         while self.keep_measuring:
             try:
-                current_mem = self._query_gpu_mem()
+                current_mem = query()
                 if current_mem > self.peak_memory:
                     self.peak_memory = current_mem
-            except Exception:
-                pass
+            except Exception as e:
+                Log(f"[GPU Mem] Poll error: {e}")
             time.sleep(2.0)
 
     def start(self):
+        if self._backend is None:
+            return
+        query = (self._query_gpu_mem_pynvml if self._backend == "pynvml"
+                 else self._query_gpu_mem_nvsmi)
         try:
-            self.baseline_memory = self._query_gpu_mem()
-        except Exception:
+            self.baseline_memory = query()
+            Log(f"[GPU Mem] Baseline: {self.baseline_memory} MB")
+        except Exception as e:
             self.baseline_memory = 0
+            Log(f"[GPU Mem] Baseline query failed: {e}")
         self.thread.start()
 
     def stop(self):
         self.keep_measuring = False
-        time.sleep(0.1)
-        return max(0, self.peak_memory - self.baseline_memory)
+        time.sleep(0.2)
+        net = max(0, self.peak_memory - self.baseline_memory)
+        Log(f"[GPU Mem] Peak: {self.peak_memory} MB | "
+            f"Baseline: {self.baseline_memory} MB | "
+            f"Net (peak-baseline): {net} MB")
+        return net
 
 
 class SLAM:
