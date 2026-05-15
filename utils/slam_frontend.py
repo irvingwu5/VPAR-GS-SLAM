@@ -199,9 +199,10 @@ class FrontEnd(mp.Process):
                 new_T = torch.from_numpy(w2c[:3, 3]).float().cuda()
                 viewpoint.update_RT(new_R, new_T)
 
-                if use_dpvo:
+                # DPVO acceptance logged only on first accepted frame (no per-frame spam)
+                if use_dpvo and cur_frame_idx == self.vo_prior_warmup + 1:
                     Log(
-                        f"[VOPrior] frame {cur_frame_idx}: DPVO accepted"
+                        f"[VOPrior] DPVO active from frame {cur_frame_idx}"
                     )
             else:
                 # Warmup: feed frames to build DPVO internal state
