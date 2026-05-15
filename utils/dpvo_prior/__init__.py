@@ -64,8 +64,9 @@ def _dpvo_process(cfg, weight_path, ht, wd, device_id, cmd_queue, result_queue):
                 with torch.no_grad():
                     slam(tstamp=frame_id, image=image, intrinsics=intrinsics)
 
-                if frame_id % 5 == 0 and slam is not None:
-                    _log_gpu_memory(slam, frame_id)
+                # Memory profiling disabled after OOM fix confirmed. Keep helpers for debugging.
+                # if frame_id % 5 == 0 and slam is not None:
+                #     _log_gpu_memory(slam, frame_id)
 
                 if slam.is_initialized:
                     n = slam.n
@@ -73,9 +74,7 @@ def _dpvo_process(cfg, weight_path, ht, wd, device_id, cmd_queue, result_queue):
                     P_cur = SE3(slam.pg.poses_[n - 1 : n])
                     # Internal poses are W2C. delta = C2W_{t-1}^{-1} @ C2W_t = P_{t-1} * P_t^{-1}
                     delta_c2w = (P_prev * P_cur.inv()).matrix()[0].cpu().numpy()
-                    with torch.no_grad():
-                        quality = float(slam.motion_probe())
-                    result_queue.put((frame_id, delta_c2w, quality, True))
+                    result_queue.put((frame_id, delta_c2w, 0.0, True))
                 else:
                     result_queue.put((frame_id, None, 0.0, False))
             else:

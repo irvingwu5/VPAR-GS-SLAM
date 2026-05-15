@@ -92,9 +92,8 @@ class FrontEnd(mp.Process):
         return c2w_prev @ delta
 
     def _select_initial_c2w(self, dpvo_c2w, dpvo_quality, cv_c2w):
-        """Select best initial C2W: DPVO (if quality gate passes) > constant_velocity > None."""
-        flow_thresh = self.vo_prior_flow_thresh
-        if dpvo_c2w is not None and dpvo_quality is not None and dpvo_quality > flow_thresh:
+        """Select best initial C2W: DPVO > constant_velocity > None."""
+        if dpvo_c2w is not None:
             self._use_dpvo_this_frame = True
             return dpvo_c2w
         self._use_dpvo_this_frame = False
@@ -202,8 +201,7 @@ class FrontEnd(mp.Process):
 
                 if use_dpvo:
                     Log(
-                        f"[VOPrior] frame {cur_frame_idx}: DPVO accepted, "
-                        f"flow_qual={dpvo_info.get('flow_quality', 0):.2f}"
+                        f"[VOPrior] frame {cur_frame_idx}: DPVO accepted"
                     )
             else:
                 # Warmup: feed frames to build DPVO internal state
