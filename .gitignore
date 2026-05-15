@@ -18,3 +18,8 @@ result*
 .claude/
 AGENTS.md
 CLAUDE.md
+docs/
+configs/rgbd/replica/ablation_r0/
+configs/rgbd/tum/ablation_fr1/
+configs/rgbd/tum/ablation_fr3/
+configs/rgbd/tum/ablation_log/
