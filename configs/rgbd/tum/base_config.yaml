@@ -1,105 +1,119 @@
 ## SLAM parameters
+
+# ---- Output & Logging ----
 Results:
-  save_results: True
-  save_dir: "results"
-  save_trj: True
-  save_trj_kf_intv: 5
-  use_gui: True
-  eval_rendering: False
-  use_wandb: False
+  save_results: True          # whether to write results to disk
+  save_dir: "results"         # root directory for result output
+  save_trj: True              # save estimated trajectory (TUM/KITTI format)
+  save_trj_kf_intv: 5         # save trajectory every N keyframes (1 = every kf)
+  use_gui: True               # launch Open3D/OpenGL GUI visualizer
+  eval_rendering: False       # compute PSNR/SSIM/LPIPS after mapping (costly)
+  use_wandb: False            # upload metrics to Weights & Biases
 
+# ---- Dataset ----
 Dataset:
-  type: 'tum'
-  sensor_type: 'depth'
-  pcd_downsample: 128
-  pcd_downsample_init: 32
-  adaptive_pointsize: True
-  point_size: 0.01
+  type: 'tum'                 # dataset loader: 'tum' | 'replica' | 'realsense'
+  sensor_type: 'depth'        # 'depth' for RGB-D, 'monocular' for mono
+  pcd_downsample: 128         # downsample factor for point cloud init from depth (higher = fewer Gaussians, range: 16-256)
+  pcd_downsample_init: 32     # downsample factor for initial keyframe only (lower = denser init, range: 16-128)
+  adaptive_pointsize: True    # scale initial point size by depth (True = better for varying-depth scenes)
+  point_size: 0.01            # initial Gaussian radius in world units when adaptive_pointsize=False
 
+# ---- SLAM Training ----
 Training:
-  #Initialization
-  init_itr_num: 1050
-  init_gaussian_update: 100
-  init_gaussian_reset: 500
-  init_gaussian_th: 0.005
-  init_gaussian_extent: 30
-  # Tracking and Mapping
-  tracking_itr_num: 100
-  mapping_itr_num: 150
-  gaussian_update_every: 150
-  gaussian_update_offset: 50
-  gaussian_th: 0.7
-  gaussian_extent: 1.0
-  gaussian_reset: 2001
-  size_threshold: 20
-  kf_interval: 5
-  window_size: 8
-  pose_window: 3
-  edge_threshold: 1.1
-  rgb_boundary_threshold: 0.01
-  alpha: 0.9
-  kf_translation: 0.08
-  kf_min_translation: 0.05
-  kf_overlap: 0.9
-  kf_cutoff: 0.3
-  prune_mode: 'slam'
-  single_thread: False
-  spherical_harmonics: False
+  # ------ Initialization (first frame mapping) ------
+  init_itr_num: 1050          # mapping iterations for the first keyframe (higher = better init, range: 500-2000)
+  init_gaussian_update: 100   # densify/prune every N iters during init (range: 50-200)
+  init_gaussian_reset: 500    # reset opacity at this iter during init (prune low-opacity Gaussians, range: 200-1000)
+  init_gaussian_th: 0.005     # opacity threshold for pruning during init (lower = keep more, range: 0.001-0.01)
+  init_gaussian_extent: 30    # spatial extent multiplier for densify during init, larger = more aggressive splitting (range: 10-50)
+
+  # ------ Tracking (per-frame pose estimation) ------
+  tracking_itr_num: 100       # render-compare optimizer steps per frame (higher = more accurate, slower. range: 30-200)
+  mapping_itr_num: 150        # BA iterations per keyframe mapping window (higher = better map, slower. range: 50-300)
+  gaussian_update_every: 150  # densify/prune Gaussians every N mapping iterations (range: 50-300)
+  gaussian_update_offset: 50  # skip first N mapping iterations before densification (range: 0-100)
+  gaussian_th: 0.7            # opacity threshold for pruning during tracking+removal (higher = more aggressive prune, range: 0.3-0.9)
+  gaussian_extent: 1.0        # spatial extent multiplier for densify (lower = more conservative split, range: 0.5-3.0)
+  gaussian_reset: 2001        # reset opacity every N mapping iterations across window (removes stale Gaussians, range: 1000-4000)
+  size_threshold: 20          # max Gaussian size (radius) in world units before splitting (range: 5-50)
+
+  # ------ Keyframe Selection ------
+  kf_interval: 5              # minimum frames between keyframes (range: 1-20)
+  window_size: 8              # sliding window size for local BA (number of keyframes, range: 4-20)
+  pose_window: 3              # number of non-kf frames whose poses are also optimized in BA (range: 1-8)
+  edge_threshold: 1.1         # gradient-based edge mask multiplier; pixels with gradient > median*threshold are excluded from loss (range: 0.8-2.0, set higher to mask fewer edges)
+  rgb_boundary_threshold: 0.01 # exclude pixels where RGB sum < threshold (black/boundary regions, range: 0.0-0.05)
+  alpha: 0.9                  # balancing weight for depth loss (1-alpha)=rgb loss weight (range: 0.5-1.0, higher = trust depth more)
+
+  # ------ Keyframe Trigger Thresholds ------
+  kf_translation: 0.08        # translational distance (m) relative to median depth to trigger new kf (range: 0.03-0.15)
+  kf_min_translation: 0.05    # absolute minimum translation (m) to allow new kf (range: 0.01-0.08)
+  kf_overlap: 0.9             # max visible ratio between current frame and last kf before triggering new kf (lower = more kfs, range: 0.5-0.95)
+  kf_cutoff: 0.3              # minimum overlap to accept a keyframe; below this the kf is considered too different and skipped (range: 0.1-0.5)
+
+  # ------ System ------
+  prune_mode: 'slam'          # pruning strategy: 'slam' (frontend pruning, all Gaussians kept) | 'odometry' (remove Gaussians not in current window)
+  single_thread: False        # run mapping in main thread instead of background mp.Process (True = easier debug)
+  spherical_harmonics: False  # use SH view-dependent color (True = better quality, much slower and more VRAM)
+
+  # ------ Learning Rates (tracking pose optimizer) ------
   lr:
-    cam_rot_delta: 0.003
-    cam_trans_delta: 0.001
+    cam_rot_delta: 0.003      # Adam LR for SO(3) rotation delta (range: 0.001-0.01)
+    cam_trans_delta: 0.001    # Adam LR for translation delta (range: 0.0005-0.005)
 
-
-
-## 3DGS default parameters
+# ---- Gaussian Optimization (mapping backend) ----
 opt_params:
-  iterations: 30000
-  position_lr_init: 0.00016
-  position_lr_final: 0.0000016
-  position_lr_delay_mult: 0.01
-  position_lr_max_steps: 30000
-  feature_lr: 0.0025
-  opacity_lr: 0.05
-  scaling_lr: 0.001
-  rotation_lr: 0.001
-  percent_dense: 0.01
-  lambda_dssim: 0.2
-  densification_interval: 100
-  opacity_reset_interval: 3000
-  densify_from_iter: 500
-  densify_until_iter: 15000
-  densify_grad_threshold: 0.0002
+  iterations: 30000           # max total mapping iterations (only reached for very long sequences)
+  position_lr_init: 0.00016   # initial LR for Gaussian mean positions (range: 0.0001-0.001)
+  position_lr_final: 0.0000016 # final LR after cosine decay (range: 1e-7-1e-5)
+  position_lr_delay_mult: 0.01 # initial LR multiplier before warmup ends (range: 0.005-0.05)
+  position_lr_max_steps: 30000  # steps over which LR decays from init to final
+  feature_lr: 0.0025          # LR for RGB color features (range: 0.001-0.01)
+  opacity_lr: 0.05            # LR for Gaussian opacity (range: 0.01-0.1)
+  scaling_lr: 0.001           # LR for Gaussian scale (range: 0.0005-0.005)
+  rotation_lr: 0.001          # LR for Gaussian rotation quaternion (range: 0.0005-0.005)
+  percent_dense: 0.01         # fraction of Gaussians with top gradients selected for densification (range: 0.005-0.02)
+  lambda_dssim: 0.2           # SSIM loss weight in RGB loss (1-lambda_dssim = L1 weight, range: 0.1-0.3)
+  densification_interval: 100  # apply densify/prune every N mapping iters (range: 50-200)
+  opacity_reset_interval: 3000 # periodically reset opacity to 0.01 to allow removal of low-contribution Gaussians (range: 1000-5000)
+  densify_from_iter: 500      # start densification after this many mapping iters (range: 100-1000)
+  densify_until_iter: 15000   # stop densification after this many mapping iters (range: 5000-20000)
+  densify_grad_threshold: 0.0002 # gradient threshold to trigger clone/split (range: 0.0001-0.001)
 
+# ---- Gaussian Model ----
 model_params:
-  sh_degree: 0
-  source_path: ""
-  model_path: ""
-  resolution: -1
-  white_background: False
-  data_device: "cuda"
+  sh_degree: 0                # spherical harmonics degree for view-dependent color (0 = diffuse/Lambertian, 1-3 = specular)
+  source_path: ""             # dataset path (filled at runtime)
+  model_path: ""              # model save/load path (filled at runtime)
+  resolution: -1              # image resolution scale; -1 uses native resolution, >0 = fixed pixel count
+  white_background: False     # render with white background (usually False for indoor SLAM)
+  data_device: "cuda"         # device for data tensors
 
+# ---- Rendering Pipeline ----
 pipeline_params:
-  convert_SHs_python: False
-  compute_cov3D_python: False
-  depth_ratio: 1.0 #1=median depth,0=expected depth
+  convert_SHs_python: False   # compute SH colors in Python instead of CUDA (slower, debug only)
+  compute_cov3D_python: False # compute 3D covariance in Python (slower, debug only)
+  depth_ratio: 1.0            # 1 = median depth (bounded/indoor scenes), 0 = expected depth (unbounded/outdoor, reduces disk aliasing)
 
-# ========== VO Prior (DPVO) ==========
+# ---- VO Prior (DPVO monocular visual odometry) ----
 VOPrior:
-  enabled: True
-  type: "dpvo"
-  warmup_frames: 10
-  tracking_itr_accepted: 60
-  tracking_itr_fallback: 100
-  flow_quality_thresh: 1.5
-  dpvo_queue_timeout: 0.5
-  dpvo_device_id: 0          # GPU device for DPVO (0=share with main, 1=separate GPU)
+  enabled: True               # enable DPVO as tracking pose prior
+  type: "dpvo"                # VO backend: "dpvo" | "none"
+  warmup_frames: 10           # feed first N frames to DPVO for initialization before using its output (DPVO needs ~8 frames)
+  tracking_itr_accepted: 60   # tracking iteration count when DPVO pose is used (range: 30-80)
+  tracking_itr_fallback: 100  # tracking iteration count without DPVO (range: 80-150)
+  flow_quality_thresh: 1.5    # [deprecated] motion_probe() threshold (quality gate removed — DPVO trusted when initialized)
+  dpvo_queue_timeout: 0.5     # max seconds to wait for DPVO result per frame
+  dpvo_device_id: 0           # GPU device for DPVO subprocess (0 = share with main, 1 = dedicated second GPU)
 
+# ---- DPVO Network Configuration ----
 DPVO:
-  weight_path: "submodules/DPVO/models/dpvo.pth"
-  config_file: "submodules/DPVO/config/default.yaml"
-  BUFFER_SIZE: 512            # max keyframes in circular buffer (default: 4096)
-  PATCHES_PER_FRAME: 48      # patches per frame (default: 96, fast: 48)
-  OPTIMIZATION_WINDOW: 10
-  PATCH_LIFETIME: 13
-  REMOVAL_WINDOW: 22
-  KEYFRAME_THRESH: 15.0
+  weight_path: "submodules/DPVO/models/dpvo.pth"   # pretrained DPVO checkpoint
+  config_file: "submodules/DPVO/config/default.yaml" # DPVO default config template
+  BUFFER_SIZE: 512            # max keyframes in DPVO circular buffer (default: 4096, reducing saves VRAM)
+  PATCHES_PER_FRAME: 48      # feature patches extracted per frame (default: 96, lower = faster but less robust)
+  OPTIMIZATION_WINDOW: 10    # frames optimized in each BA window (range: 5-15)
+  PATCH_LIFETIME: 13         # how many frames a patch-pair edge survives (range: 8-20)
+  REMOVAL_WINDOW: 22         # after this many frames inactive edges/patches are removed (range: 15-40)
+  KEYFRAME_THRESH: 15.0      # minimum flow (pixels) between keyframes for DPVO (range: 10.0-25.0)
