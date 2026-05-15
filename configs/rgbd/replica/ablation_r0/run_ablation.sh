@@ -1,11 +1,11 @@
-#!/bin/sh
+#!/bin/bash
 # Ablation study: Baseline vs VO-prior on replica room0
-# Usage: bash configs/rgbd/replica/ablation_r0/run_ablation.sh
+# Usage: cd VPAR-GS-SLAM && bash configs/rgbd/replica/ablation_r0/run_ablation.sh
 set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+PROJECT_ROOT="$(pwd)"
 RESULT_DIR="$PROJECT_ROOT/results/Ablation/room0"
+CONFIG_DIR="$PROJECT_ROOT/configs/rgbd/replica/ablation_r0"
 
 mkdir -p "$RESULT_DIR"
 
@@ -19,16 +19,14 @@ echo "=============================================="
 
 echo ""
 echo "=== [A] Baseline: VO=off, tracking_itr=100 ==="
-cd "$PROJECT_ROOT"
 CUDA_VISIBLE_DEVICES="$GPU_ID" python slam.py \
-  --config "$SCRIPT_DIR/A_baseline.yaml" --eval \
+  --config "$CONFIG_DIR/A_baseline.yaml" --eval \
   2>&1 | tee "$RESULT_DIR/A_baseline.log"
 
 echo ""
 echo "=== [B] A+VO: VO=on ==="
-cd "$PROJECT_ROOT"
 CUDA_VISIBLE_DEVICES="$GPU_ID" python slam.py \
-  --config "$SCRIPT_DIR/B_AplusVO.yaml" --eval \
+  --config "$CONFIG_DIR/B_AplusVO.yaml" --eval \
   2>&1 | tee "$RESULT_DIR/B_AplusVO.log"
 
 echo ""

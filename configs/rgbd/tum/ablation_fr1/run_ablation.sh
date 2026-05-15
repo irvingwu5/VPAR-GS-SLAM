@@ -1,18 +1,18 @@
 #!/bin/bash
-# Ablation study: Baseline vs VO-prior on fr3_office
-# Usage: cd VPAR-GS-SLAM && bash configs/rgbd/tum/ablation_fr3/run_ablation.sh
+# Ablation study: Baseline vs VO-prior on fr1_desk
+# Usage: cd VPAR-GS-SLAM && bash configs/rgbd/tum/ablation_fr1/run_ablation.sh
 set -eu
 
 PROJECT_ROOT="$(pwd)"
-RESULT_DIR="$PROJECT_ROOT/results/Ablation/fr3_office"
-CONFIG_DIR="$PROJECT_ROOT/configs/rgbd/tum/ablation_fr3"
+RESULT_DIR="$PROJECT_ROOT/results/Ablation/fr1_desk"
+CONFIG_DIR="$PROJECT_ROOT/configs/rgbd/tum/ablation_fr1"
 
 mkdir -p "$RESULT_DIR"
 
 GPU_ID="${GPU_ID:-1}"
 
 echo "=============================================="
-echo "Ablation: fr3_office"
+echo "Ablation: fr1_desk"
 echo "  GPU: $GPU_ID"
 echo "  Results: $RESULT_DIR"
 echo "=============================================="

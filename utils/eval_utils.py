@@ -128,6 +128,7 @@ def eval_rendering(
     background,
     kf_indices,
     iteration="final",
+    save_images=True,
 ):
     interval = 5
     img_pred, img_gt, saved_frame_idx = [], [], []
@@ -136,6 +137,12 @@ def eval_rendering(
     cal_lpips = LearnedPerceptualImagePatchSimilarity(
         net_type="alex", normalize=True
     ).to("cuda")
+
+    render_save_dir = None
+    if save_images and save_dir is not None:
+        render_save_dir = os.path.join(save_dir, "psnr", str(iteration), "rendering")
+        mkdir_p(render_save_dir)
+
     for idx in range(0, end_idx, interval):
         if idx in kf_indices:
             continue
@@ -143,7 +150,8 @@ def eval_rendering(
         frame = frames[idx]
         gt_image, _, _ = dataset[idx]
 
-        rendering = render(frame, gaussians, pipe, background)["render"]
+        render_pkg = render(frame, gaussians, pipe, background)
+        rendering = render_pkg["render"]
         image = torch.clamp(rendering, 0.0, 1.0)
 
         gt = (gt_image.cpu().numpy().transpose((1, 2, 0)) * 255).astype(np.uint8)
@@ -154,6 +162,22 @@ def eval_rendering(
         pred = cv2.cvtColor(pred, cv2.COLOR_BGR2RGB)
         img_pred.append(pred)
         img_gt.append(gt)
+
+        # Save rendered images
+        if render_save_dir is not None:
+            cv2.imwrite(os.path.join(render_save_dir, f"{idx:05d}_rgb.png"), pred)
+            cv2.imwrite(os.path.join(render_save_dir, f"{idx:05d}_gt.png"), gt)
+
+            if "depth" in render_pkg:
+                depth = render_pkg["depth"].detach().cpu().numpy().squeeze()
+                depth_vis = (depth / max(depth.max(), 1e-8) * 255).astype(np.uint8)
+                cv2.imwrite(os.path.join(render_save_dir, f"{idx:05d}_depth.png"), depth_vis)
+
+            if "rend_normal" in render_pkg:
+                normal = render_pkg["rend_normal"].detach().cpu().numpy()
+                normal = (normal * 0.5 + 0.5).transpose(1, 2, 0) * 255
+                normal = normal.astype(np.uint8)
+                cv2.imwrite(os.path.join(render_save_dir, f"{idx:05d}_normal.png"), normal)
 
         mask = gt_image > 0
 
