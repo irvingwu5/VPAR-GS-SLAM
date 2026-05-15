@@ -14,6 +14,7 @@ datasets
 wandb
 
 result*
+.idea/
 .gitnexus
 .claude/
 AGENTS.md
