@@ -66,22 +66,8 @@ class FrontEnd(mp.Process):
         self.window_size = self.config["Training"]["window_size"]
         self.single_thread = self.config["Training"]["single_thread"]
 
-    def _init_vo_prior(self):
-        if self.vo_prior is not None:
-            return
-        if self.vo_prior_type != "dpvo":
-            return
-        from utils.dpvo_prior import DPVOProvider
-        self.vo_prior = DPVOProvider(
-            self.config,
-            W=self.dataset.width,
-            H=self.dataset.height,
-            fx=self.dataset.fx,
-            fy=self.dataset.fy,
-            cx=self.dataset.cx,
-            cy=self.dataset.cy,
-        )
-        Log(f"[VOPrior] DPVO provider initialized (W={self.dataset.width}, H={self.dataset.height})")
+    def set_vo_prior(self, provider):
+        self.vo_prior = provider
 
     def _camera_rgb(self, viewpoint):
         """Camera tensor (3,H,W) float [0,1] -> numpy (H,W,3) uint8 [0,255]"""
@@ -192,7 +178,6 @@ class FrontEnd(mp.Process):
         use_dpvo = False
         if self.vo_prior_enabled and self.vo_prior_type == "dpvo":
             if cur_frame_idx > self.vo_prior_warmup:
-                self._init_vo_prior()
                 prev_c2w = self._camera_c2w(
                     self.cameras[cur_frame_idx - 1]
                 )
@@ -221,8 +206,7 @@ class FrontEnd(mp.Process):
                         f"flow_qual={dpvo_info.get('flow_quality', 0):.2f}"
                     )
             else:
-                # Warmup: init DPVO early and feed frames to build internal state
-                self._init_vo_prior()
+                # Warmup: feed frames to build DPVO internal state
                 if self.vo_prior is not None:
                     rgb_np = self._camera_rgb(viewpoint)
                     prev_c2w = self._camera_c2w(

@@ -92,6 +92,24 @@ class SLAM:
 
         self.backend.set_hyperparams()
 
+        # ---- DPVO Pose Prior ----
+        vop = config.get("VOPrior", {})
+        self.vo_prior = None
+        if vop.get("enabled", False) and vop.get("type", "none") == "dpvo":
+            from utils.dpvo_prior import DPVOProvider
+            self.vo_prior = DPVOProvider(
+                config,
+                W=self.dataset.width,
+                H=self.dataset.height,
+                fx=self.dataset.fx,
+                fy=self.dataset.fy,
+                cx=self.dataset.cx,
+                cy=self.dataset.cy,
+            )
+            Log(f"[VOPrior] DPVO provider initialized by slam.py "
+                f"(W={self.dataset.width}, H={self.dataset.height})")
+        self.frontend.set_vo_prior(self.vo_prior)
+
         self.params_gui = gui_utils.ParamsGUI(
             pipe=self.pipeline_params,
             background=self.background,
@@ -109,6 +127,11 @@ class SLAM:
         backend_process.start()
         self.frontend.run()
         backend_queue.put(["pause"])
+
+        # Shutdown DPVO prior
+        if self.vo_prior is not None:
+            self.vo_prior.stop()
+            Log("[VOPrior] DPVO process stopped by slam.py")
 
         end.record()
         torch.cuda.synchronize()
