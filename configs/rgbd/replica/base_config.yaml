@@ -101,11 +101,13 @@ VOPrior:
   tracking_itr_fallback: 100 # iters when DPVO rejected or unavailable
   flow_quality_thresh: 1.5  # motion_probe() minimum for DPVO acceptance
   dpvo_queue_timeout: 0.5   # seconds to wait for DPVO result
+  dpvo_device_id: 0          # GPU device for DPVO (0=share, 1=separate GPU)
 
 DPVO:
   weight_path: "submodules/DPVO/models/dpvo.pth"
   config_file: "submodules/DPVO/config/default.yaml"
-  PATCHES_PER_FRAME: 96
+  BUFFER_SIZE: 512
+  PATCHES_PER_FRAME: 48
   OPTIMIZATION_WINDOW: 10
   PATCH_LIFETIME: 13
   REMOVAL_WINDOW: 22

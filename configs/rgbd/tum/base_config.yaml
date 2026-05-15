@@ -85,18 +85,20 @@ pipeline_params:
 
 # ========== VO Prior (DPVO) ==========
 VOPrior:
-  enabled: False
+  enabled: True
   type: "dpvo"
   warmup_frames: 10
   tracking_itr_accepted: 60
   tracking_itr_fallback: 100
   flow_quality_thresh: 1.5
   dpvo_queue_timeout: 0.5
+  dpvo_device_id: 0          # GPU device for DPVO (0=share with main, 1=separate GPU)
 
 DPVO:
   weight_path: "submodules/DPVO/models/dpvo.pth"
   config_file: "submodules/DPVO/config/default.yaml"
-  PATCHES_PER_FRAME: 96
+  BUFFER_SIZE: 512            # max keyframes in circular buffer (default: 4096)
+  PATCHES_PER_FRAME: 48      # patches per frame (default: 96, fast: 48)
   OPTIMIZATION_WINDOW: 10
   PATCH_LIFETIME: 13
   REMOVAL_WINDOW: 22

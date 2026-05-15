@@ -6,8 +6,10 @@ import torch.multiprocessing as mp
 import numpy as np
 
 
-def _dpvo_process(cfg, weight_path, ht, wd, cmd_queue, result_queue):
+def _dpvo_process(cfg, weight_path, ht, wd, device_id, cmd_queue, result_queue):
     """Run DPVO in a dedicated subprocess (spawn context, own CUDA stream)."""
+    torch.cuda.set_device(device_id)
+
     from dpvo.dpvo import DPVO
     from dpvo.lietorch import SE3
 
@@ -59,6 +61,9 @@ class DPVOProvider:
         self._n_initialized_frames = 0
         self.process = None
 
+        # GPU device for DPVO (default: share with main process)
+        self._dpvo_device = config["VOPrior"].get("dpvo_device_id", 0)
+
         # Build DPVO YACS config
         from dpvo.config import cfg as _dpvo_cfg
         config_file = config["DPVO"]["config_file"]
@@ -67,7 +72,7 @@ class DPVOProvider:
             config_file = os.path.join(repo_root, config_file)
         _dpvo_cfg.merge_from_file(config_file)
         for key in ["PATCHES_PER_FRAME", "OPTIMIZATION_WINDOW", "PATCH_LIFETIME",
-                     "REMOVAL_WINDOW", "KEYFRAME_THRESH"]:
+                     "REMOVAL_WINDOW", "KEYFRAME_THRESH", "BUFFER_SIZE"]:
             if key in config["DPVO"]:
                 setattr(_dpvo_cfg, key, config["DPVO"][key])
 
@@ -88,7 +93,7 @@ class DPVOProvider:
         self.process = ctx.Process(
             target=_dpvo_process,
             args=(self.dpvo_cfg, self.weight_path, self.H, self.W,
-                  self.cmd_queue, self.result_queue),
+                  self._dpvo_device, self.cmd_queue, self.result_queue),
             daemon=True,
         )
         self.process.start()
@@ -103,9 +108,9 @@ class DPVOProvider:
             est_c2w: (4, 4) numpy float64, estimated current C2W (metric scale)
             info:    dict with keys "flow_quality", optionally "error"
         """
-        image = torch.from_numpy(rgb_uint8_np.copy()).permute(2, 0, 1).cuda()
+        image = torch.from_numpy(rgb_uint8_np.copy()).permute(2, 0, 1).cuda(self._dpvo_device)
         intrinsics = torch.tensor([self.fx, self.fy, self.cx, self.cy],
-                                  dtype=torch.float32, device="cuda")
+                                  dtype=torch.float32, device=f"cuda:{self._dpvo_device}")
 
         self.cmd_queue.put(("track", self._frame_counter, image, intrinsics))
         self._frame_counter += 1
