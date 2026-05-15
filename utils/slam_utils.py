@@ -88,14 +88,43 @@ def get_loss_tracking_rgbd(
     return alpha * l1_rgb + (1 - alpha) * l1_depth.mean()
 
 
-def get_loss_mapping(config, image, depth, viewpoint, opacity, initialization=False):
+def get_loss_mapping(
+    config,
+    image,
+    depth,
+    viewpoint,
+    opacity,
+    initialization=False,
+    iteration_count=None,
+    rend_normal=None,
+    surf_normal=None,
+    rend_dist=None,
+):
     if initialization:
         image_ab = image
     else:
         image_ab = (torch.exp(viewpoint.exposure_a)) * image + viewpoint.exposure_b
     if config["Training"]["monocular"]:
-        return get_loss_mapping_rgb(config, image_ab, depth, viewpoint)
-    return get_loss_mapping_rgbd(config, image_ab, depth, viewpoint)
+        loss = get_loss_mapping_rgb(config, image_ab, depth, viewpoint)
+    else:
+        loss = get_loss_mapping_rgbd(config, image_ab, depth, viewpoint)
+
+    opt = config["opt_params"]
+    lambda_normal = opt.get("lambda_normal", 0.0)
+    lambda_dist = opt.get("lambda_dist", 0.0)
+    normal_start = opt.get("normal_start_iter", 7000)
+    dist_start = opt.get("dist_start_iter", 3000)
+
+    if lambda_dist > 0 and rend_dist is not None and iteration_count is not None:
+        if iteration_count >= dist_start:
+            loss = loss + lambda_dist * rend_dist.mean()
+
+    if lambda_normal > 0 and rend_normal is not None and surf_normal is not None and iteration_count is not None:
+        if iteration_count >= normal_start:
+            normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
+            loss = loss + lambda_normal * normal_error.mean()
+
+    return loss
 
 
 def get_loss_mapping_rgb(config, image, depth, viewpoint):

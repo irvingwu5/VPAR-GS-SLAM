@@ -65,6 +65,10 @@ opt_params:
   rotation_lr: 0.001
   percent_dense: 0.01
   lambda_dssim: 0.2
+  lambda_normal: 0.0          # normal consistency loss weight (2DGS: 0.05)
+  lambda_dist: 0.0            # depth distortion loss weight (2DGS: 1.0)
+  normal_start_iter: 7000     # enable normal loss after this many mapping iters
+  dist_start_iter: 3000       # enable distortion loss after this many mapping iters
   densification_interval: 100
   opacity_reset_interval: 3000
   densify_from_iter: 500

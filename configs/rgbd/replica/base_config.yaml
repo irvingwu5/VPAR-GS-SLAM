@@ -87,6 +87,10 @@ opt_params:
   rotation_lr: 0.001          # LR for Gaussian rotation quaternion (range: 0.0005-0.005)
   percent_dense: 0.01         # fraction of Gaussians with top gradients selected for densification (range: 0.005-0.02)
   lambda_dssim: 0.2           # SSIM loss weight in RGB loss (1-lambda_dssim = L1 weight, range: 0.1-0.3)
+  lambda_normal: 0.0          # normal consistency loss weight (2DGS: 0.05)
+  lambda_dist: 0.0            # depth distortion loss weight (2DGS: 1.0)
+  normal_start_iter: 7000     # enable normal loss after this many mapping iters
+  dist_start_iter: 3000       # enable distortion loss after this many mapping iters
   densification_interval: 100  # apply densify/prune every N mapping iters (range: 50-200)
   opacity_reset_interval: 3000 # periodically reset opacity to allow removal of stale Gaussians (range: 1000-5000)
   densify_from_iter: 500      # start densification after this many mapping iters (range: 100-1000)
@@ -117,15 +121,15 @@ VOPrior:
   tracking_itr_fallback: 100  # tracking iteration count without DPVO (range: 80-150)
   flow_quality_thresh: 1.5    # [deprecated] quality gate removed — DPVO trusted when initialized
   dpvo_queue_timeout: 0.5     # max seconds to wait for DPVO result per frame
-  dpvo_device_id: 0           # GPU device for DPVO subprocess (0 = share with main, 1 = dedicated second GPU)
+  dpvo_device_id: 1           # CUDA device for DPVO. With CUDA_VISIBLE_DEVICES=1,0: cuda:1→GPU0(DPVO), cuda:0→GPU1(main)
 
 # ---- DPVO Network Configuration ----
 DPVO:
   weight_path: "submodules/DPVO/models/dpvo.pth"   # pretrained DPVO checkpoint
   config_file: "submodules/DPVO/config/default.yaml" # DPVO default config template
-  BUFFER_SIZE: 512            # max keyframes in DPVO circular buffer (default: 4096, reducing saves VRAM)
-  PATCHES_PER_FRAME: 48      # feature patches extracted per frame (default: 96, lower = faster but less robust)
-  OPTIMIZATION_WINDOW: 10    # frames optimized in each BA window (range: 5-15)
-  PATCH_LIFETIME: 13         # how many frames a patch-pair edge survives (range: 8-20)
-  REMOVAL_WINDOW: 22         # after this many frames inactive edges/patches are removed (range: 15-40)
-  KEYFRAME_THRESH: 15.0      # minimum flow (pixels) between keyframes for DPVO (range: 10.0-25.0)
+  BUFFER_SIZE: 4096           # max keyframes in DPVO circular buffer (paper default: 4096)
+  PATCHES_PER_FRAME: 96      # feature patches extracted per frame (paper default: 96)
+  OPTIMIZATION_WINDOW: 10    # frames optimized in each BA window (paper default: 10)
+  PATCH_LIFETIME: 13         # how many frames a patch-pair edge survives (paper default: 13)
+  REMOVAL_WINDOW: 22         # after this many frames inactive edges/patches are removed (paper default: 22)
+  KEYFRAME_THRESH: 15.0      # minimum flow (pixels) between keyframes for DPVO (paper default: 15.0)

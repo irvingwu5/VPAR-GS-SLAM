@@ -169,7 +169,11 @@ class BackEnd(mp.Process):
                 viewpoint = viewpoint_stack[cam_idx]
                 keyframes_opt.append(viewpoint)
                 render_pkg = render(
-                    viewpoint, self.gaussians, self.pipeline_params, self.background
+                    viewpoint,
+                    self.gaussians,
+                    self.pipeline_params,
+                    self.background,
+                    surf=True,
                 )
                 (
                     image,
@@ -190,7 +194,15 @@ class BackEnd(mp.Process):
                 )
 
                 loss_mapping += get_loss_mapping(
-                    self.config, image, depth, viewpoint, opacity
+                    self.config,
+                    image,
+                    depth,
+                    viewpoint,
+                    opacity,
+                    iteration_count=self.iteration_count,
+                    rend_normal=render_pkg["rend_normal"],
+                    surf_normal=render_pkg["surf_normal"],
+                    rend_dist=render_pkg["rend_dist"],
                 )
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
@@ -200,7 +212,11 @@ class BackEnd(mp.Process):
             for cam_idx in torch.randperm(len(random_viewpoint_stack))[:2]:
                 viewpoint = random_viewpoint_stack[cam_idx]
                 render_pkg = render(
-                    viewpoint, self.gaussians, self.pipeline_params, self.background
+                    viewpoint,
+                    self.gaussians,
+                    self.pipeline_params,
+                    self.background,
+                    surf=True,
                 )
                 (
                     image,
@@ -220,7 +236,15 @@ class BackEnd(mp.Process):
                     render_pkg["n_touched"],
                 )
                 loss_mapping += get_loss_mapping(
-                    self.config, image, depth, viewpoint, opacity
+                    self.config,
+                    image,
+                    depth,
+                    viewpoint,
+                    opacity,
+                    iteration_count=self.iteration_count,
+                    rend_normal=render_pkg["rend_normal"],
+                    surf_normal=render_pkg["surf_normal"],
+                    rend_dist=render_pkg["rend_dist"],
                 )
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
