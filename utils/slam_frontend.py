@@ -92,7 +92,7 @@ class FrontEnd(mp.Process):
         return c2w_prev @ delta
 
     def _select_initial_c2w(self, dpvo_c2w, dpvo_quality, cv_c2w):
-        """Select best initial C2W: DPVO > constant_velocity > None."""
+        """Select best initial C2W: DPVO > constant_velocity > None (caller falls back to prev frame)."""
         if dpvo_c2w is not None:
             self._use_dpvo_this_frame = True
             return dpvo_c2w
