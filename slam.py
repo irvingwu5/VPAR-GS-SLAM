@@ -1,5 +1,7 @@
 import os
+import subprocess
 import sys
+import threading
 import time
 from argparse import ArgumentParser
 from datetime import datetime
@@ -20,6 +22,48 @@ from utils.logging_utils import Log
 from utils.multiprocessing_utils import FakeQueue
 from utils.slam_backend import BackEnd
 from utils.slam_frontend import FrontEnd
+
+
+class GPUMemoryMonitor:
+    """Background thread that polls nvidia-smi to track peak physical GPU memory."""
+
+    def __init__(self, physical_gpu_id=0):
+        self.keep_measuring = True
+        self.peak_memory = 0
+        self.baseline_memory = 0
+        self.physical_gpu_id = physical_gpu_id
+        self.thread = threading.Thread(target=self._measure_usage, daemon=True)
+
+    def _query_gpu_mem(self):
+        result = subprocess.check_output(
+            [
+                'nvidia-smi', f'--id={self.physical_gpu_id}',
+                '--query-gpu=memory.used',
+                '--format=csv,nounits,noheader'
+            ], encoding='utf-8')
+        return int(result.strip())
+
+    def _measure_usage(self):
+        while self.keep_measuring:
+            try:
+                current_mem = self._query_gpu_mem()
+                if current_mem > self.peak_memory:
+                    self.peak_memory = current_mem
+            except Exception:
+                pass
+            time.sleep(2.0)
+
+    def start(self):
+        try:
+            self.baseline_memory = self._query_gpu_mem()
+        except Exception:
+            self.baseline_memory = 0
+        self.thread.start()
+
+    def stop(self):
+        self.keep_measuring = False
+        time.sleep(0.1)
+        return max(0, self.peak_memory - self.baseline_memory)
 
 
 class SLAM:
@@ -141,6 +185,11 @@ class SLAM:
         Log("Total time", start.elapsed_time(end) * 0.001, tag="Eval")
         Log("Total FPS", N_frames / (start.elapsed_time(end) * 0.001), tag="Eval")
 
+        num_gaussians = self.gaussians.get_xyz.shape[0]
+        Log(f"Number of Gaussians: {num_gaussians}", tag="Eval")
+        algo_peak_mb = torch.cuda.max_memory_allocated(device="cuda") / (1024 * 1024)
+        Log(f"Peak GPU Memory (PyTorch alloc): {algo_peak_mb:.2f} MB", tag="Eval")
+
         if self.eval_rendering:
             self.gaussians = self.frontend.gaussians
             kf_indices = self.frontend.kf_indices
@@ -209,6 +258,13 @@ class SLAM:
             wandb.log({"Metrics": metrics_table})
             save_gaussians(self.gaussians, self.save_dir, "final_after_opt", final=True)
 
+            ply_path = os.path.join(
+                self.save_dir, "point_cloud", "final", "point_cloud.ply"
+            )
+            if os.path.exists(ply_path):
+                map_size_mb = os.path.getsize(ply_path) / (1024 * 1024)
+                Log(f"Final Map Size (PLY): {map_size_mb:.2f} MB", tag="Eval")
+
         backend_queue.put(["stop"])
         backend_process.join()
         Log("Backend stopped and joined the main thread")
@@ -238,7 +294,7 @@ if __name__ == "__main__":
     save_dir = None
 
     if args.eval:
-        Log("Running MonoGS in Evaluation Mode")
+        Log("Running VPAR-GS-SLAM in Evaluation Mode")
         Log("Following config will be overriden")
         Log("\tsave_results=True")
         config["Results"]["save_results"] = True
@@ -264,7 +320,7 @@ if __name__ == "__main__":
             documents = yaml.dump(config, file)
         Log("saving results in " + save_dir)
         run = wandb.init(
-            project="MonoGS",
+            project="vpar-gs-slam",
             name=f"{tmp}_{current_datetime}",
             config=config,
             mode=None if config["Results"]["use_wandb"] else "disabled",
@@ -272,9 +328,20 @@ if __name__ == "__main__":
         wandb.define_metric("frame_idx")
         wandb.define_metric("ate*", step_metric="frame_idx")
 
-    slam = SLAM(config, save_dir=save_dir)
+    # GPU Memory Monitor (nvidia-smi physical peak, paper metric)
+    gpu_id_str = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+    physical_gpu_id = int(gpu_id_str.split(',')[0])
+    mem_monitor = GPUMemoryMonitor(physical_gpu_id=physical_gpu_id)
+    mem_monitor.start()
+    Log(f"Started tracking physical GPU {physical_gpu_id} memory...")
 
+    slam = SLAM(config, save_dir=save_dir)
     slam.run()
+
+    if save_dir is not None:
+        real_peak_memory_mb = mem_monitor.stop()
+        Log(f"System Physical Peak GPU Memory (nvidia-smi): {real_peak_memory_mb:.2f} MB", tag="Eval")
+
     wandb.finish()
 
     # All done
