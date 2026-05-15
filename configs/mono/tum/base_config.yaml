@@ -76,3 +76,22 @@ model_params:
 pipeline_params:
   convert_SHs_python: False
   compute_cov3D_python: False
+
+# ========== VO Prior (DPVO) ==========
+VOPrior:
+  enabled: False
+  type: "dpvo"
+  warmup_frames: 10
+  tracking_itr_accepted: 60
+  tracking_itr_fallback: 100
+  flow_quality_thresh: 1.5
+  dpvo_queue_timeout: 0.5
+
+DPVO:
+  weight_path: "submodules/DPVO/models/dpvo.pth"
+  config_file: "submodules/DPVO/config/default.yaml"
+  PATCHES_PER_FRAME: 96
+  OPTIMIZATION_WINDOW: 10
+  PATCH_LIFETIME: 13
+  REMOVAL_WINDOW: 22
+  KEYFRAME_THRESH: 15.0

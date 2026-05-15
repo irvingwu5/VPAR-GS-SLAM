@@ -91,3 +91,22 @@ pipeline_params:
   convert_SHs_python: False
   compute_cov3D_python: False
   depth_ratio: 1.0 #1=median depth,0=expected depth
+
+# ========== VO Prior (DPVO) ==========
+VOPrior:
+  enabled: False
+  type: "dpvo"              # "none" | "dpvo"
+  warmup_frames: 10         # skip first N tracking frames (DPVO needs 8 for init)
+  tracking_itr_accepted: 60 # iters when DPVO pose accepted
+  tracking_itr_fallback: 100 # iters when DPVO rejected or unavailable
+  flow_quality_thresh: 1.5  # motion_probe() minimum for DPVO acceptance
+  dpvo_queue_timeout: 0.5   # seconds to wait for DPVO result
+
+DPVO:
+  weight_path: "submodules/DPVO/models/dpvo.pth"
+  config_file: "submodules/DPVO/config/default.yaml"
+  PATCHES_PER_FRAME: 96
+  OPTIMIZATION_WINDOW: 10
+  PATCH_LIFETIME: 13
+  REMOVAL_WINDOW: 22
+  KEYFRAME_THRESH: 15.0

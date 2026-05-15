@@ -11,7 +11,7 @@ from utils.camera_utils import Camera
 from utils.eval_utils import eval_ate, save_gaussians
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
-from utils.pose_utils import update_pose
+from utils.pose_utils import update_pose, rt2mat
 from utils.slam_utils import get_loss_tracking, get_median_depth
 
 
@@ -43,6 +43,18 @@ class FrontEnd(mp.Process):
         self.device = "cuda:0"
         self.pause = False
 
+        # VO Prior (DPVO) configuration
+        vop = config.get("VOPrior", {})
+        self.vo_prior_enabled = vop.get("enabled", False)
+        self.vo_prior_type = vop.get("type", "none")
+        self.vo_prior_warmup = vop.get("warmup_frames", 10)
+        self.vo_prior_tracking_itr_accepted = vop.get("tracking_itr_accepted", 60)
+        self.vo_prior_tracking_itr_fallback = vop.get("tracking_itr_fallback", 100)
+        self.vo_prior_flow_thresh = vop.get("flow_quality_thresh", 1.5)
+        self.vo_prior = None
+        self._last_two_metric_c2w = []  # for constant_velocity model
+        self._use_dpvo_this_frame = False  # tracking() sets this
+
     def set_hyperparams(self):
         self.save_dir = self.config["Results"]["save_dir"]
         self.save_results = self.config["Results"]["save_results"]
@@ -53,6 +65,56 @@ class FrontEnd(mp.Process):
         self.kf_interval = self.config["Training"]["kf_interval"]
         self.window_size = self.config["Training"]["window_size"]
         self.single_thread = self.config["Training"]["single_thread"]
+
+    def _init_vo_prior(self):
+        if self.vo_prior is not None:
+            return
+        if self.vo_prior_type != "dpvo":
+            return
+        from utils.dpvo_prior import DPVOProvider
+        self.vo_prior = DPVOProvider(
+            self.config,
+            W=self.dataset.width,
+            H=self.dataset.height,
+            fx=self.dataset.fx,
+            fy=self.dataset.fy,
+            cx=self.dataset.cx,
+            cy=self.dataset.cy,
+        )
+        Log(f"[VOPrior] DPVO provider initialized (W={self.dataset.width}, H={self.dataset.height})")
+
+    def _camera_rgb(self, viewpoint):
+        """Camera tensor (3,H,W) float [0,1] -> numpy (H,W,3) uint8 [0,255]"""
+        img = viewpoint.original_image.detach().cpu().permute(1, 2, 0).numpy()
+        img = (img * 255.0).clip(0, 255).astype(np.uint8)
+        return img
+
+    def _camera_c2w(self, viewpoint):
+        """Camera W2C -> metric C2W (4x4 numpy float64)"""
+        R = viewpoint.R.detach().cpu().numpy()
+        T = viewpoint.T.detach().cpu().numpy()
+        w2c = rt2mat(R, T)
+        return np.linalg.inv(w2c)
+
+    def _build_constant_velocity_c2w(self):
+        """Extrapolate constant velocity C2W from last two metric poses."""
+        if len(self._last_two_metric_c2w) < 2:
+            return None
+        c2w_prev = self._last_two_metric_c2w[-1]   # C2W_{t-1}
+        c2w_pprev = self._last_two_metric_c2w[-2]   # C2W_{t-2}
+        delta = np.linalg.inv(c2w_pprev) @ c2w_prev
+        return c2w_prev @ delta
+
+    def _select_initial_c2w(self, dpvo_c2w, dpvo_quality, cv_c2w):
+        """Select best initial C2W: DPVO (if quality gate passes) > constant_velocity > None."""
+        flow_thresh = self.vo_prior_flow_thresh
+        if dpvo_c2w is not None and dpvo_quality is not None and dpvo_quality > flow_thresh:
+            self._use_dpvo_this_frame = True
+            return dpvo_c2w
+        self._use_dpvo_this_frame = False
+        if cv_c2w is not None:
+            return cv_c2w
+        return None
 
     def add_new_keyframe(self, cur_frame_idx, depth=None, opacity=None, init=False):
         rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"]
@@ -126,9 +188,56 @@ class FrontEnd(mp.Process):
         self.reset = False
 
     def tracking(self, cur_frame_idx, viewpoint):
-        prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
-        viewpoint.update_RT(prev.R, prev.T)
+        # ---- Step 1: Determine initial pose ----
+        use_dpvo = False
+        if self.vo_prior_enabled and self.vo_prior_type == "dpvo":
+            if cur_frame_idx > self.vo_prior_warmup:
+                self._init_vo_prior()
+                prev_c2w = self._camera_c2w(
+                    self.cameras[cur_frame_idx - 1]
+                )
+                rgb_np = self._camera_rgb(viewpoint)
+                dpvo_ok, dpvo_c2w, dpvo_info = self.vo_prior.track(
+                    rgb_np, prev_c2w
+                )
+                cv_c2w = self._build_constant_velocity_c2w()
+                best_c2w = self._select_initial_c2w(
+                    dpvo_c2w if dpvo_ok else None,
+                    dpvo_info.get("flow_quality"),
+                    cv_c2w,
+                )
+                use_dpvo = self._use_dpvo_this_frame
+                if best_c2w is None:
+                    best_c2w = prev_c2w
 
+                w2c = np.linalg.inv(best_c2w)
+                new_R = torch.from_numpy(w2c[:3, :3]).float().cuda()
+                new_T = torch.from_numpy(w2c[:3, 3]).float().cuda()
+                viewpoint.update_RT(new_R, new_T)
+
+                if use_dpvo:
+                    Log(
+                        f"[VOPrior] frame {cur_frame_idx}: DPVO accepted, "
+                        f"flow_qual={dpvo_info.get('flow_quality', 0):.2f}"
+                    )
+            else:
+                # Warmup: init DPVO early and feed frames to build internal state
+                self._init_vo_prior()
+                if self.vo_prior is not None:
+                    rgb_np = self._camera_rgb(viewpoint)
+                    prev_c2w = self._camera_c2w(
+                        self.cameras[cur_frame_idx - 1]
+                    )
+                    self.vo_prior.track(rgb_np, prev_c2w)
+                # Use previous frame pose during warmup (DPVO not ready yet)
+                prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
+                viewpoint.update_RT(prev.R, prev.T)
+        else:
+            # Original behavior: previous frame pose
+            prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
+            viewpoint.update_RT(prev.R, prev.T)
+
+        # ---- Step 2: Set up optimizer ----
         opt_params = []
         opt_params.append(
             {
@@ -159,8 +268,15 @@ class FrontEnd(mp.Process):
             }
         )
 
+        # ---- Step 3: Render-based tracking refinement ----
+        itr_num = (
+            self.vo_prior_tracking_itr_accepted
+            if use_dpvo
+            else self.vo_prior_tracking_itr_fallback
+        )
+
         pose_optimizer = torch.optim.Adam(opt_params)
-        for tracking_itr in range(self.tracking_itr_num):
+        for tracking_itr in range(itr_num):
             render_pkg = render(
                 viewpoint, self.gaussians, self.pipeline_params, self.background
             )
@@ -192,7 +308,15 @@ class FrontEnd(mp.Process):
             if converged:
                 break
 
+        # ---- Step 4: Update state for next frame ----
         self.median_depth = get_median_depth(depth, opacity)
+
+        # Update metric C2W history for constant_velocity model
+        final_c2w = self._camera_c2w(viewpoint)
+        self._last_two_metric_c2w.append(final_c2w)
+        if len(self._last_two_metric_c2w) > 2:
+            self._last_two_metric_c2w.pop(0)
+
         return render_pkg
 
     def is_keyframe(
@@ -380,6 +504,11 @@ class FrontEnd(mp.Process):
 
                 if self.reset:
                     self.initialize(cur_frame_idx, viewpoint)
+                    # Reset DPVO on re-initialization
+                    self._last_two_metric_c2w = []
+                    if self.vo_prior is not None:
+                        self.vo_prior.reset()
+                        Log("[VOPrior] DPVO reset on re-initialization")
                     self.current_window.append(cur_frame_idx)
                     cur_frame_idx += 1
                     continue
@@ -494,3 +623,8 @@ class FrontEnd(mp.Process):
                 elif data[0] == "stop":
                     Log("Frontend Stopped.")
                     break
+
+        # Shutdown DPVO prior
+        if self.vo_prior is not None:
+            self.vo_prior.stop()
+            Log("[VOPrior] DPVO process stopped")

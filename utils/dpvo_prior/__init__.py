@@ -1,0 +1,151 @@
+"""DPVO Pose Prior Bridge — wraps DPVO monocular VO in a subprocess for VPAR-GS-SLAM."""
+
+import os
+import torch
+import torch.multiprocessing as mp
+import numpy as np
+
+
+def _dpvo_process(cfg, weight_path, ht, wd, cmd_queue, result_queue):
+    """Run DPVO in a dedicated subprocess (spawn context, own CUDA stream)."""
+    from dpvo.dpvo import DPVO
+    from dpvo.lietorch import SE3
+
+    slam = None
+    try:
+        while True:
+            msg = cmd_queue.get()
+            if msg[0] == "stop":
+                if slam is not None:
+                    slam.terminate()
+                break
+            elif msg[0] == "track":
+                frame_id, image, intrinsics = msg[1:]
+                if slam is None:
+                    slam = DPVO(cfg, weight_path, ht=ht, wd=wd, viz=False)
+
+                slam(tstamp=frame_id, image=image, intrinsics=intrinsics)
+
+                if slam.is_initialized:
+                    n = slam.n
+                    P_prev = SE3(slam.pg.poses_[n - 2 : n - 1])
+                    P_cur = SE3(slam.pg.poses_[n - 1 : n])
+                    # Internal poses are W2C. delta = C2W_{t-1}^{-1} @ C2W_t = P_{t-1} * P_t^{-1}
+                    delta_c2w = (P_prev * P_cur.inv()).matrix()[0].cpu().numpy()
+                    quality = float(slam.motion_probe())
+                    result_queue.put((frame_id, delta_c2w, quality, True))
+                else:
+                    result_queue.put((frame_id, None, 0.0, False))
+            else:
+                raise ValueError(f"Unknown DPVO command: {msg[0]}")
+    except Exception:
+        result_queue.put((-1, None, 0.0, False))
+        import traceback
+        traceback.print_exc()
+
+
+class DPVOProvider:
+    """Manages DPVO subprocess lifecycle. Provides per-frame relative C2W pose deltas."""
+
+    def __init__(self, config, W, H, fx, fy, cx, cy):
+        self.config = config
+        self.W = W
+        self.H = H
+        self.fx = fx
+        self.fy = fy
+        self.cx = cx
+        self.cy = cy
+        self._frame_counter = 0
+        self._n_initialized_frames = 0
+        self.process = None
+
+        # Build DPVO YACS config
+        from dpvo.config import cfg as _dpvo_cfg
+        config_file = config["DPVO"]["config_file"]
+        if not os.path.isabs(config_file):
+            repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            config_file = os.path.join(repo_root, config_file)
+        _dpvo_cfg.merge_from_file(config_file)
+        for key in ["PATCHES_PER_FRAME", "OPTIMIZATION_WINDOW", "PATCH_LIFETIME",
+                     "REMOVAL_WINDOW", "KEYFRAME_THRESH"]:
+            if key in config["DPVO"]:
+                setattr(_dpvo_cfg, key, config["DPVO"][key])
+
+        self.dpvo_cfg = _dpvo_cfg.clone()
+
+        weight_path = config["DPVO"]["weight_path"]
+        if not os.path.isabs(weight_path):
+            repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            weight_path = os.path.join(repo_root, weight_path)
+        self.weight_path = weight_path
+
+        self._start_process()
+
+    def _start_process(self):
+        ctx = mp.get_context("spawn")
+        self.cmd_queue = ctx.Queue(maxsize=1)
+        self.result_queue = ctx.Queue(maxsize=1)
+        self.process = ctx.Process(
+            target=_dpvo_process,
+            args=(self.dpvo_cfg, self.weight_path, self.H, self.W,
+                  self.cmd_queue, self.result_queue),
+            daemon=True,
+        )
+        self.process.start()
+
+    def track(self, rgb_uint8_np, prev_metric_c2w):
+        """
+        Args:
+            rgb_uint8_np:  (H, W, 3) numpy uint8 [0, 255]
+            prev_metric_c2w: (4, 4) numpy float64, previous frame's metric C2W matrix
+        Returns:
+            success: bool
+            est_c2w: (4, 4) numpy float64, estimated current C2W (metric scale)
+            info:    dict with keys "flow_quality", optionally "error"
+        """
+        image = torch.from_numpy(rgb_uint8_np.copy()).permute(2, 0, 1).cuda()
+        intrinsics = torch.tensor([self.fx, self.fy, self.cx, self.cy],
+                                  dtype=torch.float32, device="cuda")
+
+        self.cmd_queue.put(("track", self._frame_counter, image, intrinsics))
+        self._frame_counter += 1
+
+        timeout = self.config["VOPrior"].get("dpvo_queue_timeout", 0.5)
+        try:
+            fid, delta_c2w, quality, ok = self.result_queue.get(timeout=timeout)
+        except Exception:
+            return False, prev_metric_c2w, {"error": "timeout"}
+
+        if not ok or delta_c2w is None:
+            return False, prev_metric_c2w, {"flow_quality": quality}
+
+        self._n_initialized_frames += 1
+
+        # Anti-drift: apply DPVO delta to previous metric pose
+        est_c2w = prev_metric_c2w @ delta_c2w
+        info = {"flow_quality": quality}
+        return True, est_c2w, info
+
+    def is_initialized(self):
+        return self._n_initialized_frames > 0
+
+    def reset(self):
+        self.stop()
+        self._frame_counter = 0
+        self._n_initialized_frames = 0
+        self._start_process()
+
+    def stop(self):
+        try:
+            self.cmd_queue.put(("stop",))
+        except Exception:
+            pass
+        if self.process is not None:
+            self.process.join(timeout=5)
+            if self.process.is_alive():
+                self.process.terminate()
+                self.process.join(timeout=2)
+            self.process = None
+
+    def __del__(self):
+        self.stop()
