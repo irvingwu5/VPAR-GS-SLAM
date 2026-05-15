@@ -1,0 +1,5 @@
+# Ablation B: A+VO - VO prior enabled
+inherit_from: "configs/rgbd/replica/room0.yaml"
+
+VOPrior:
+  enabled: True

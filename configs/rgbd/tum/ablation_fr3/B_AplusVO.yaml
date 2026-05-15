@@ -1,0 +1,5 @@
+# Ablation B: A+VO - VO prior enabled
+inherit_from: "configs/rgbd/tum/fr3_office.yaml"
+
+VOPrior:
+  enabled: True

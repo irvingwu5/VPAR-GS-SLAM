@@ -1,0 +1,8 @@
+# Ablation A: Baseline - VO disabled, original 100 tracking iterations
+inherit_from: "configs/rgbd/replica/room0.yaml"
+
+VOPrior:
+  enabled: False
+
+Training:
+  tracking_itr_num: 100
