@@ -6,6 +6,41 @@ import torch.multiprocessing as mp
 import numpy as np
 
 
+def _fmt_mb(t):
+    """Format tensor size in MB, return 'N/A' if not a tensor."""
+    if not isinstance(t, torch.Tensor):
+        return "N/A"
+    return f"{t.element_size() * t.numel() / 1024 / 1024:.2f} MB"
+
+
+def _log_gpu_memory(slam, frame_id):
+    """Print per-frame GPU memory breakdown of all major DPVO buffers."""
+    pg = slam.pg
+    alloc = torch.cuda.memory_allocated() / 1024 / 1024
+    rsvd = torch.cuda.memory_reserved() / 1024 / 1024
+    print(f"[DPVO MEM] frame {frame_id} | n={slam.n} m={slam.m} | "
+          f"alloc={alloc:.1f} MB reserved={rsvd:.1f} MB",
+          flush=True)
+
+    # Edge buffers (GROWING candidates)
+    n_active = pg.ii.numel()
+    n_inactive = pg.ii_inac.numel()
+    print(f"  edges: active={n_active} inactive={n_inactive} "
+          f"net={_fmt_mb(pg.net)} target={_fmt_mb(pg.target)} "
+          f"target_inac={_fmt_mb(pg.target_inac)}",
+          flush=True)
+
+    # Feature maps
+    print(f"  fmap1={_fmt_mb(slam.fmap1_)} fmap2={_fmt_mb(slam.fmap2_)} "
+          f"imap={_fmt_mb(slam.imap_)} gmap={_fmt_mb(slam.gmap_)}",
+          flush=True)
+
+    # Patch buffers
+    print(f"  patches={_fmt_mb(pg.patches_)} net_shape={list(pg.net.shape)} "
+          f"ii_inac_shape={list(pg.ii_inac.shape)}",
+          flush=True)
+
+
 def _dpvo_process(cfg, weight_path, ht, wd, device_id, cmd_queue, result_queue):
     """Run DPVO in a dedicated subprocess (spawn context, own CUDA stream)."""
     torch.cuda.set_device(device_id)
@@ -29,6 +64,9 @@ def _dpvo_process(cfg, weight_path, ht, wd, device_id, cmd_queue, result_queue):
                     slam = DPVO(cfg, weight_path, ht=ht, wd=wd, viz=False)
 
                 slam(tstamp=frame_id, image=image, intrinsics=intrinsics)
+
+                if frame_id % 5 == 0 and slam is not None:
+                    _log_gpu_memory(slam, frame_id)
 
                 if slam.is_initialized:
                     n = slam.n
