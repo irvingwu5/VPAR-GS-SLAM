@@ -9,6 +9,9 @@ Results:
   use_gui: True               # launch Open3D/OpenGL GUI visualizer
   eval_rendering: False       # compute PSNR/SSIM/LPIPS after mapping (costly)
   use_wandb: False            # upload metrics to Weights & Biases
+  save_render_rgb: False      # save rendered RGB + GT images during eval rendering
+  save_render_depth: False    # save rendered depth visualization during eval rendering
+  save_render_normal: False   # save rendered normal map during eval rendering
 
 # ---- Dataset ----
 Dataset:
@@ -87,9 +90,11 @@ opt_params:
   rotation_lr: 0.001          # LR for Gaussian rotation quaternion (range: 0.0005-0.005)
   percent_dense: 0.01         # fraction of Gaussians with top gradients selected for densification (range: 0.005-0.02)
   lambda_dssim: 0.2           # SSIM loss weight in RGB loss (1-lambda_dssim = L1 weight, range: 0.1-0.3)
-  lambda_normal: 0.0          # normal consistency loss weight (2DGS: 0.05)
+  lambda_normal: 0.0         # normal consistency loss weight (2DGS: 0.0,modify in ablation yaml files)
+  normal_loss_type: "gt"      # "gt": precomputed GT normals (fast); "surf": depth-to-normal from rendered depth (original)
   lambda_dist: 0.0            # depth distortion loss weight (2DGS: 1.0)
-  normal_start_iter: 7000     # enable normal loss after this many mapping iters
+  normal_start_iter: 0         # enable normal loss after this many mapping iters
+  normal_apply_iters: 1       # only apply normal loss in first N mapping iters per keyframe (1 = once, like 4DTAM's itr==0)
   dist_start_iter: 3000       # enable distortion loss after this many mapping iters
   densification_interval: 100  # apply densify/prune every N mapping iters (range: 50-200)
   opacity_reset_interval: 3000 # periodically reset opacity to allow removal of stale Gaussians (range: 1000-5000)
@@ -133,3 +138,34 @@ DPVO:
   PATCH_LIFETIME: 13         # how many frames a patch-pair edge survives (paper default: 13)
   REMOVAL_WINDOW: 22         # after this many frames inactive edges/patches are removed (paper default: 22)
   KEYFRAME_THRESH: 15.0      # minimum flow (pixels) between keyframes for DPVO (paper default: 15.0)
+
+# ---- FFT Mask (FrontEnd frequency analysis for Gaussian placement density and scale) ----
+fftmask:
+  enabled: False               # enable FFT-based frequency analysis for adaptive Gaussian placement
+  clahe_clip_limit: 2.0        # CLAHE contrast enhancement clip limit (range: 1.0-4.0)
+  clahe_tile_grid: [8, 8]      # CLAHE tile grid (rows, cols)
+  num_bands: 4                 # number of frequency bands for multi-layer spectrogram (range: 2-6)
+  base_sigma: 5.0              # base Gaussian sigma for high-pass filter (range: 2.0-10.0)
+  sigma_step: 5.0              # sigma increment per frequency band (range: 2.0-10.0)
+  log_epsilon: 1.0e-6          # epsilon for log to avoid log(0)
+  triangle_bins: 256           # histogram bins for Triangle thresholding
+  high_freq_stride: 2          # grid stride for high-freq placement (pixels, smaller = denser)
+  low_freq_stride: 4           # grid stride for low-freq placement (pixels, larger = sparser)
+  scale_min: 0.01              # minimum world-space scale for high-freq areas
+  scale_max: 0.1               # maximum world-space scale for low-freq areas
+  depth_scale_factor: 1.0      # multiplier for depth-based scale adjustment
+
+# ---- Error Mask (BackEnd rendering-error-based densification, replaces gradient clone/split) ----
+errormask:
+  enabled: False               # enable error-mask densification (replaces gradient-based clone/split)
+  silhouette_thresh: 0.98      # opacity below this = silhouette error (range: 0.9-0.99)
+  depth_error_mult: 10.0       # depth error > median * this = depth error (range: 5.0-20.0)
+  rgb_error_thresh: 0.5        # per-pixel RGB L1 sum > this = RGB error (range: 0.3-1.0)
+  min_new_gaussians: 0         # minimum new Gaussians to create per densification pass
+  max_new_gaussians: 5000      # maximum new Gaussians per densification pass
+  new_scale_min: 0.005         # minimum world-space scale for newly created Gaussians
+  new_scale_max: 0.1           # maximum world-space scale for newly created Gaussians
+  new_opacity: 0.5             # initial opacity for newly created Gaussians
+  apply_every: 100             # apply error-mask densification every N mapping iterations
+  apply_offset: 50             # skip first N mapping iterations before applying error-mask densification
+  prune_scale_th: 1.0          # Replica: max_scale / extent threshold for FGS pruning (lower = more aggressive)

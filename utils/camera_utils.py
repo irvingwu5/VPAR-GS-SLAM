@@ -2,6 +2,7 @@ import torch
 from torch import nn
 
 from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2
+from utils.normal_utils import intrins_to_intrins_inv, get_cam_coords, d2n_tblr
 from utils.slam_utils import image_gradient, image_gradient_mask
 
 
@@ -36,6 +37,9 @@ class Camera(nn.Module):
         self.original_image = color
         self.depth = depth
         self.grad_mask = None
+        self.normal = None
+        self.normal_mask = None
+        self.gt_depth = None
 
         self.fx = fx
         self.fy = fy
@@ -61,6 +65,13 @@ class Camera(nn.Module):
         )
 
         self.projection_matrix = projection_matrix.to(device=device)
+
+        intrins = torch.tensor(
+            [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], device=device
+        )
+        self.intrins_inv = (
+            intrins_to_intrins_inv(intrins).float().unsqueeze(0).to(device)
+        )
 
     @staticmethod
     def init_from_dataset(dataset, idx, projection_matrix):
@@ -142,6 +153,17 @@ class Camera(nn.Module):
                 img_grad_intensity > median_img_grad_intensity * edge_threshold
             )
 
+        # Precompute GT normal from depth (camera-space, no pose dependency)
+        if self.depth is not None:
+            self.gt_depth = torch.from_numpy(self.depth).to(
+                dtype=torch.float32, device=self.device
+            )[None]
+            depth_4d = self.gt_depth.unsqueeze(0)
+            points = get_cam_coords(self.intrins_inv, depth_4d)
+            normal, valid_mask = d2n_tblr(points, d_min=1e-3, d_max=1000.0)
+            self.normal = normal * valid_mask
+            self.normal_mask = valid_mask
+
     def clean(self):
         self.original_image = None
         self.depth = None
@@ -152,3 +174,7 @@ class Camera(nn.Module):
 
         self.exposure_a = None
         self.exposure_b = None
+
+        self.normal = None
+        self.normal_mask = None
+        self.gt_depth = None

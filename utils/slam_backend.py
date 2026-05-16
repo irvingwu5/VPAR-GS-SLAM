@@ -10,6 +10,7 @@ from gaussian_splatting.utils.loss_utils import l1_loss, ssim
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose
+from utils.error_mask import ErrorMaskDensifier
 from utils.slam_utils import get_loss_mapping
 
 
@@ -38,6 +39,9 @@ class BackEnd(mp.Process):
         self.initialized = not self.monocular
         self.keyframe_optimizers = None
 
+        self.fft_masks = {}
+        self.error_mask_densifier = None
+
     def set_hyperparams(self):
         self.save_results = self.config["Results"]["save_results"]
 
@@ -63,6 +67,13 @@ class BackEnd(mp.Process):
             if "single_thread" in self.config["Dataset"]
             else False
         )
+        lambda_normal = self.config["opt_params"].get("lambda_normal", 0.0)
+        normal_loss_type = self.config["opt_params"].get("normal_loss_type", "surf")
+        self.use_normal = lambda_normal > 0
+        self.normal_loss_type = normal_loss_type
+        self.need_surf = (normal_loss_type == "surf") and (lambda_normal > 0)
+        self.normal_apply_iters = self.config["opt_params"].get("normal_apply_iters", 1)
+        self.normal_start = self.config["opt_params"].get("normal_start_iter", 0)
 
     def add_next_kf(self, frame_idx, viewpoint, init=False, scale=2.0, depth_map=None):
         self.gaussians.extend_from_pcd_seq(
@@ -76,6 +87,7 @@ class BackEnd(mp.Process):
         self.current_window = []
         self.initialized = not self.monocular
         self.keyframe_optimizers = None
+        self.fft_masks = {}
 
         # remove all gaussians
         self.gaussians.prune_points(self.gaussians.unique_kfIDs >= 0)
@@ -120,11 +132,19 @@ class BackEnd(mp.Process):
                     viewspace_point_tensor, visibility_filter
                 )
                 if mapping_iteration % self.init_gaussian_update == 0:
+                    errormask_enabled = self.config.get("errormask", {}).get(
+                        "enabled", False
+                    )
+                    prune_scale_th = self.config.get("errormask", {}).get(
+                        "prune_scale_th", 10.0
+                    )
                     self.gaussians.densify_and_prune(
                         self.opt_params.densify_grad_threshold,
                         self.init_gaussian_th,
                         self.init_gaussian_extent,
                         None,
+                        use_fgs_pruning=errormask_enabled,
+                        prune_scale_th=prune_scale_th,
                     )
 
                 if self.iteration_count == self.init_gaussian_reset or (
@@ -173,7 +193,7 @@ class BackEnd(mp.Process):
                     self.gaussians,
                     self.pipeline_params,
                     self.background,
-                    surf=True,
+                    surf=self.need_surf,
                 )
                 (
                     image,
@@ -203,6 +223,9 @@ class BackEnd(mp.Process):
                     rend_normal=render_pkg["rend_normal"],
                     surf_normal=render_pkg["surf_normal"],
                     rend_dist=render_pkg["rend_dist"],
+                    gt_normal_cam=viewpoint.normal,
+                    gt_normal_mask=viewpoint.normal_mask,
+                    apply_normal=_ >= self.normal_start and (self.normal_apply_iters == 0 or _ < self.normal_start + self.normal_apply_iters),
                 )
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
@@ -216,7 +239,7 @@ class BackEnd(mp.Process):
                     self.gaussians,
                     self.pipeline_params,
                     self.background,
-                    surf=True,
+                    surf=self.need_surf,
                 )
                 (
                     image,
@@ -245,6 +268,9 @@ class BackEnd(mp.Process):
                     rend_normal=render_pkg["rend_normal"],
                     surf_normal=render_pkg["surf_normal"],
                     rend_dist=render_pkg["rend_dist"],
+                    gt_normal_cam=viewpoint.normal,
+                    gt_normal_mask=viewpoint.normal_mask,
+                    apply_normal=_ >= self.normal_start and (self.normal_apply_iters == 0 or _ < self.normal_start + self.normal_apply_iters),
                 )
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
@@ -309,12 +335,53 @@ class BackEnd(mp.Process):
                     == self.gaussian_update_offset
                 )
                 if update_gaussian:
-                    self.gaussians.densify_and_prune(
-                        self.opt_params.densify_grad_threshold,
-                        self.gaussian_th,
-                        self.gaussian_extent,
-                        self.size_threshold,
+                    errormask_enabled = self.config.get("errormask", {}).get(
+                        "enabled", False
                     )
+
+                    if errormask_enabled and self.error_mask_densifier is None:
+                        self.error_mask_densifier = ErrorMaskDensifier(
+                            self.config, self.gaussians
+                        )
+
+                    if errormask_enabled and self.error_mask_densifier is not None:
+                        for idx in range(len(current_window)):
+                            kf_idx = current_window[idx]
+                            vp = viewpoint_stack[idx]
+                            kf_fft_masks = self.fft_masks.get(kf_idx)
+                            render_pkg = render(
+                                vp, self.gaussians, self.pipeline_params,
+                                self.background, surf=self.need_surf,
+                            )
+                            error_mask, _ = self.error_mask_densifier.compute_error_mask(
+                                render_pkg, vp
+                            )
+                            pixel_indices = self.error_mask_densifier.select_pixels(
+                                error_mask, kf_fft_masks
+                            )
+                            self.error_mask_densifier.create_gaussians_at_pixels(
+                                vp, pixel_indices, kf_fft_masks, kf_idx,
+                            )
+
+                        prune_scale_th = self.config.get("errormask", {}).get(
+                            "prune_scale_th", 10.0
+                        )
+                        self.gaussians.densify_and_prune(
+                            self.opt_params.densify_grad_threshold,
+                            self.gaussian_th,
+                            self.gaussian_extent,
+                            self.size_threshold,
+                            use_fgs_pruning=True,
+                            prune_scale_th=prune_scale_th,
+                            skip_clone_split=True,
+                        )
+                    else:
+                        self.gaussians.densify_and_prune(
+                            self.opt_params.densify_grad_threshold,
+                            self.gaussian_th,
+                            self.gaussian_extent,
+                            self.size_threshold,
+                        )
                     gaussian_split = True
 
                 ## Opacity reset
@@ -432,10 +499,23 @@ class BackEnd(mp.Process):
                     viewpoint = data[2]
                     current_window = data[3]
                     depth_map = data[4]
+                    fft_masks = data[5] if len(data) > 5 else None
+
+                    if fft_masks is not None:
+                        self.fft_masks[cur_frame_idx] = {
+                            k: v.cuda() if isinstance(v, torch.Tensor) else v
+                            for k, v in fft_masks.items()
+                        }
 
                     self.viewpoints[cur_frame_idx] = viewpoint
                     self.current_window = current_window
                     self.add_next_kf(cur_frame_idx, viewpoint, depth_map=depth_map)
+
+                    if len(self.fft_masks) > self.window_size * 2:
+                        keep_ids = set(current_window)
+                        self.fft_masks = {
+                            k: v for k, v in self.fft_masks.items() if k in keep_ids
+                        }
 
                     opt_params = []
                     frames_to_optimize = self.config["Training"]["pose_window"]
