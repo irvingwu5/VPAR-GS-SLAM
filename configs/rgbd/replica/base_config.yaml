@@ -115,7 +115,12 @@ model_params:
 pipeline_params:
   convert_SHs_python: False   # compute SH colors in Python instead of CUDA
   compute_cov3D_python: False # compute 3D covariance in Python
-  depth_ratio: 1.0            # 1 = median depth (bounded/indoor scenes like Replica), 0 = expected depth (unbounded/outdoor)
+
+# ---- Surface-aware Depth ----
+surface_depth:
+  use_surface_depth: False     # enable SA depth correction in CUDA renderer
+  depth_type: "median"         # "expected" | "median" | "surface_aware" (replaces depth_ratio)
+  dist_type: "original"        # "original" | "surface_aware"
 
 # ---- VO Prior (DPVO monocular visual odometry) ----
 VOPrior:

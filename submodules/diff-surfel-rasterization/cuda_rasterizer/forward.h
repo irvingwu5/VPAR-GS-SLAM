@@ -67,7 +67,10 @@ namespace FORWARD
 		const float* bg_color,
 		float* out_color,
 		float* out_others,
-		int* n_touched);
+		int* n_touched,
+		const bool use_sa,
+		float* geo_median_depth,
+		float* geo_depth_std);
 }
 
 

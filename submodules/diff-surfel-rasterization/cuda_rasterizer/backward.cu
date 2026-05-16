@@ -182,7 +182,10 @@ renderCUDA(
 	float3* __restrict__ dL_dmean2D,
 	float* __restrict__ dL_dnormal3D,
 	float* __restrict__ dL_dopacity,
-	float* __restrict__ dL_dcolors)
+	float* __restrict__ dL_dcolors,
+	const bool use_sa,
+	const float* __restrict__ geo_median_depth,
+	const float* __restrict__ geo_depth_std)
 {
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
@@ -413,24 +416,41 @@ renderCUDA(
 
 
 #if RENDER_AXUTILITY
+			// Recover forward SA state for backward
+			float mm = geo_median_depth[pix_id];
+			float mstd = geo_depth_std[pix_id];
+			float conf = 1.0f;
+			if (use_sa) {
+				conf = T < 0.5f ? exp(-(c_d - mm) * (c_d - mm) / (4 * max(mstd / (1 - T_final), 1e-7f))) : 1.0f;
+				c_d = c_d * conf + mm * (1 - conf);
+			}
+
 			const float m_d = far_n / (far_n - near_n) * (1 - near_n / c_d);
 			const float dmd_dd = (far_n * near_n) / ((far_n - near_n) * c_d * c_d);
 			if (contributor == median_contributor-1) {
 				dL_dz += dL_dmedian_depth;
 				// dL_dweight += dL_dmax_dweight;
 			}
+			if (use_sa) {
+				dL_dweight += ((c_d - mm) * (c_d - mm)) * dL_dreg;
+			} else {
 #if DETACH_WEIGHT 
-			// if not detached weight, sometimes 
-			// it will bia toward creating extragated 2D Gaussians near front
-			dL_dweight += 0;
+				// if not detached weight, sometimes 
+				// it will bia toward creating extragated 2D Gaussians near front
+				dL_dweight += 0;
 #else
-			dL_dweight += (final_D2 + m_d * m_d * final_A - 2 * m_d * final_D) * dL_dreg;
+				dL_dweight += (final_D2 + m_d * m_d * final_A - 2 * m_d * final_D) * dL_dreg;
 #endif
+			}
 			dL_dalpha += dL_dweight - last_dL_dT;
 			// propagate the current weight W_{i} to next weight W_{i-1}
 			last_dL_dT = skip ? last_dL_dT : dL_dweight * alpha + (1 - alpha) * last_dL_dT;
-			const float dL_dmd = 2.0f * (T * alpha) * (m_d * final_A - final_D) * dL_dreg;
-			dL_dz += dL_dmd * dmd_dd;
+			if (use_sa) {
+				dL_dz += conf * 2.0f * w * (c_d - mm) * dL_dreg;
+			} else {
+				const float dL_dmd = 2.0f * (T * alpha) * (m_d * final_A - final_D) * dL_dreg;
+				dL_dz += dL_dmd * dmd_dd;
+			}
 
 			// Propagate gradients w.r.t ray-splat depths
 			accum_depth_rec = skip ? accum_depth_rec : last_alpha * last_depth + (1.f - last_alpha) * accum_depth_rec;
@@ -475,7 +495,7 @@ renderCUDA(
 			// Helpful reusable temporary variables
 			const float dL_dG = nor_o.w * dL_dalpha;
 #if RENDER_AXUTILITY
-			dL_dz += alpha * T * dL_ddepth; 
+			dL_dz += conf * alpha * T * dL_ddepth; 
 #endif
 
 			if (rho3d <= rho2d) {
@@ -933,7 +953,10 @@ void BACKWARD::render(
 	float3* dL_dmean2D,
 	float* dL_dnormal3D,
 	float* dL_dopacity,
-	float* dL_dcolors)
+	float* dL_dcolors,
+	const bool use_sa,
+	const float* geo_median_depth,
+	const float* geo_depth_std)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
 		ranges,
@@ -954,6 +977,9 @@ void BACKWARD::render(
 		dL_dmean2D,
 		dL_dnormal3D,
 		dL_dopacity,
-		dL_dcolors
+		dL_dcolors,
+		use_sa,
+		geo_median_depth,
+		geo_depth_std
 		);
 }

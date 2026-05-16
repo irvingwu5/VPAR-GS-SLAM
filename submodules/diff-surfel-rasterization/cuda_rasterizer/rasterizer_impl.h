@@ -48,6 +48,8 @@ namespace CudaRasterizer
 		uint2* ranges;
 		uint32_t* n_contrib;
 		float* accum_alpha;
+		float* m_media_depth;
+		float* depth_std;
 
 		static ImageState fromChunk(char*& chunk, size_t N);
 	};
