@@ -269,7 +269,9 @@ class SLAM:
                 self.background,
                 kf_indices=kf_indices,
                 iteration="before_opt",
-                save_images=False,
+                save_rgb=False,
+                save_depth=False,
+                save_normal=False,
             )
             columns = ["tag", "psnr", "ssim", "lpips", "RMSE ATE", "FPS"]
             metrics_table = wandb.Table(columns=columns)
@@ -296,6 +298,7 @@ class SLAM:
                     self.gaussians = gaussians
                     break
 
+            render_cfg = self.config.get("Results", {})
             rendering_result = eval_rendering(
                 self.frontend.cameras,
                 self.gaussians,
@@ -305,6 +308,9 @@ class SLAM:
                 self.background,
                 kf_indices=kf_indices,
                 iteration="after_opt",
+                save_rgb=render_cfg.get("save_render_rgb", False),
+                save_depth=render_cfg.get("save_render_depth", False),
+                save_normal=render_cfg.get("save_render_normal", False),
             )
             metrics_table.add_data(
                 "After",

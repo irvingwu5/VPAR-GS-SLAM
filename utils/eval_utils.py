@@ -128,7 +128,9 @@ def eval_rendering(
     background,
     kf_indices,
     iteration="final",
-    save_images=True,
+    save_rgb=False,
+    save_depth=False,
+    save_normal=False,
 ):
     interval = 5
     img_pred, img_gt, saved_frame_idx = [], [], []
@@ -138,8 +140,9 @@ def eval_rendering(
         net_type="alex", normalize=True
     ).to("cuda")
 
+    save_any = save_rgb or save_depth or save_normal
     render_save_dir = None
-    if save_images and save_dir is not None:
+    if save_any and save_dir is not None:
         render_save_dir = os.path.join(save_dir, "psnr", str(iteration), "rendering")
         mkdir_p(render_save_dir)
 
@@ -165,15 +168,16 @@ def eval_rendering(
 
         # Save rendered images
         if render_save_dir is not None:
-            cv2.imwrite(os.path.join(render_save_dir, f"{idx:05d}_rgb.png"), pred)
-            cv2.imwrite(os.path.join(render_save_dir, f"{idx:05d}_gt.png"), gt)
+            if save_rgb:
+                cv2.imwrite(os.path.join(render_save_dir, f"{idx:05d}_rgb.png"), pred)
+                cv2.imwrite(os.path.join(render_save_dir, f"{idx:05d}_gt.png"), gt)
 
-            if "depth" in render_pkg:
+            if save_depth and "depth" in render_pkg:
                 depth = render_pkg["depth"].detach().cpu().numpy().squeeze()
                 depth_vis = (depth / max(depth.max(), 1e-8) * 255).astype(np.uint8)
                 cv2.imwrite(os.path.join(render_save_dir, f"{idx:05d}_depth.png"), depth_vis)
 
-            if "rend_normal" in render_pkg:
+            if save_normal and "rend_normal" in render_pkg:
                 normal = render_pkg["rend_normal"].detach().cpu().numpy()
                 normal = (normal * 0.5 + 0.5).transpose(1, 2, 0) * 255
                 normal = normal.astype(np.uint8)
