@@ -39,9 +39,12 @@ def _log_gpu_memory(slam, frame_id):
           flush=True)
 
 
-def _dpvo_process(cfg, weight_path, ht, wd, device_id, cmd_queue, result_queue):
-    """Run DPVO in a dedicated subprocess (spawn context, own CUDA stream)."""
-    torch.cuda.set_device(device_id)
+def _dpvo_process(cfg, weight_path, ht, wd, cmd_queue, result_queue):
+    """Run DPVO in a dedicated subprocess (spawn context, own CUDA stream).
+
+    The parent process restricts CUDA_VISIBLE_DEVICES so only the target GPU
+    is visible.  No explicit set_device is needed — cuda:0 is the target.
+    """
 
     from dpvo.dpvo import DPVO
     from dpvo.lietorch import SE3
@@ -56,8 +59,8 @@ def _dpvo_process(cfg, weight_path, ht, wd, device_id, cmd_queue, result_queue):
                 break
             elif msg[0] == "track":
                 frame_id, image_cpu, K_cpu = msg[1:]
-                image = image_cpu.cuda(device_id)
-                intrinsics = K_cpu.cuda(device_id)
+                image = image_cpu.cuda()
+                intrinsics = K_cpu.cuda()
                 if slam is None:
                     slam = DPVO(cfg, weight_path, ht=ht, wd=wd, viz=False)
 
@@ -129,10 +132,21 @@ class DPVOProvider:
         ctx = mp.get_context("spawn")
         self.cmd_queue = ctx.Queue(maxsize=1)
         self.result_queue = ctx.Queue(maxsize=1)
+
+        # Restrict child process to only the DPVO target GPU, preventing PyTorch
+        # from creating a wasted CUDA context on the main GPU during import torch.
+        child_env = os.environ.copy()
+        cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        if cvd:
+            devices = [d.strip() for d in cvd.split(",")]
+            if self._dpvo_device < len(devices):
+                child_env["CUDA_VISIBLE_DEVICES"] = devices[self._dpvo_device]
+
         self.process = ctx.Process(
             target=_dpvo_process,
             args=(self.dpvo_cfg, self.weight_path, self.H, self.W,
-                  self._dpvo_device, self.cmd_queue, self.result_queue),
+                  self.cmd_queue, self.result_queue),
+            env=child_env,
             daemon=True,
         )
         self.process.start()
