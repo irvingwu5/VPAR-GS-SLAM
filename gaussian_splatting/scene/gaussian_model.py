@@ -660,21 +660,48 @@ class GaussianModel:
             new_n_obs=new_n_obs,
         )
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size,
+                          use_fgs_pruning=False, prune_scale_th=10.0,
+                          skip_clone_split=False):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split(grads, max_grad, extent)
+        if not skip_clone_split:
+            self.densify_and_clone(grads, max_grad, extent)
+            self.densify_and_split(grads, max_grad, extent)
 
+        if use_fgs_pruning:
+            self.prune_large_and_transparent(min_opacity, extent, prune_scale_th)
+        else:
+            prune_mask = (self.get_opacity < min_opacity).squeeze()
+            if max_screen_size:
+                big_points_vs = self.max_radii2D > max_screen_size
+                big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+                prune_mask = torch.logical_or(
+                    torch.logical_or(prune_mask, big_points_vs), big_points_ws
+                )
+            self.prune_points(prune_mask)
+
+    def prune_large_and_transparent(self, min_opacity, extent, prune_scale_th=10.0,
+                                     aspect_ratio_max=10.0, aspect_ratio_min=0.1):
+        """
+        FGS-SLAM style pruning: opacity + scale + aspect ratio checks.
+        The aspect ratio check is 2DGS-specific (2D disk surfels should be roughly circular).
+        """
         prune_mask = (self.get_opacity < min_opacity).squeeze()
-        if max_screen_size:
-            big_points_vs = self.max_radii2D > max_screen_size
-            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
 
-            prune_mask = torch.logical_or(
-                torch.logical_or(prune_mask, big_points_vs), big_points_ws
-            )
+        max_scale = self.get_scaling.max(dim=1).values
+        prune_mask = torch.logical_or(prune_mask, max_scale > prune_scale_th * extent)
+
+        scales = self.get_scaling
+        eps = 1e-8
+        aspect_ratios = scales[:, 1] / (scales[:, 0] + eps)
+        bad_aspect = torch.logical_or(
+            aspect_ratios > aspect_ratio_max,
+            aspect_ratios < aspect_ratio_min,
+        )
+        prune_mask = torch.logical_or(prune_mask, bad_aspect)
+
         self.prune_points(prune_mask)
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):

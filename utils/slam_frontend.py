@@ -12,6 +12,7 @@ from utils.eval_utils import eval_ate, save_gaussians
 from utils.logging_utils import Log
 from utils.multiprocessing_utils import clone_obj
 from utils.pose_utils import update_pose, rt2mat
+from utils.fft_mask import FFTMaskGenerator
 from utils.slam_utils import get_loss_tracking, get_median_depth
 
 
@@ -37,6 +38,8 @@ class FrontEnd(mp.Process):
         self.requested_init = False
         self.requested_keyframe = 0
         self.use_every_n_frames = 1
+
+        self.fft_generator = FFTMaskGenerator(config)
 
         self.gaussians = None
         self.cameras = dict()
@@ -392,8 +395,8 @@ class FrontEnd(mp.Process):
 
         return window, removed_frame
 
-    def request_keyframe(self, cur_frame_idx, viewpoint, current_window, depthmap):
-        msg = ["keyframe", cur_frame_idx, viewpoint, current_window, depthmap]
+    def request_keyframe(self, cur_frame_idx, viewpoint, current_window, depthmap, fft_masks=None):
+        msg = ["keyframe", cur_frame_idx, viewpoint, current_window, depthmap, fft_masks]
         self.backend_queue.put(msg)
         self.requested_keyframe += 1
 
@@ -563,8 +566,11 @@ class FrontEnd(mp.Process):
                         opacity=render_pkg["opacity"],
                         init=False,
                     )
+                    fft_masks = self.fft_generator.compute_masks(
+                        viewpoint.original_image.cuda()
+                    ) if viewpoint.original_image is not None else None
                     self.request_keyframe(
-                        cur_frame_idx, viewpoint, self.current_window, depth_map
+                        cur_frame_idx, viewpoint, self.current_window, depth_map, fft_masks
                     )
                 else:
                     self.cleanup(cur_frame_idx)
