@@ -92,10 +92,8 @@ opt_params:
   lambda_dssim: 0.2           # SSIM loss weight in RGB loss (1-lambda_dssim = L1 weight, range: 0.1-0.3)
   lambda_normal: 0.0         # normal consistency loss weight (2DGS: 0.0,modify in ablation yaml files)
   normal_loss_type: "gt"      # "gt": precomputed GT normals (fast); "surf": depth-to-normal from rendered depth (original)
-  lambda_dist: 0.0            # depth distortion loss weight (2DGS: 1.0)
   normal_start_iter: 0         # enable normal loss after this many mapping iters
   normal_apply_iters: 1       # only apply normal loss in first N mapping iters per keyframe (1 = once, like 4DTAM's itr==0)
-  dist_start_iter: 3000       # enable distortion loss after this many mapping iters
   densification_interval: 100  # apply densify/prune every N mapping iters (range: 50-200)
   opacity_reset_interval: 3000 # periodically reset opacity to allow removal of stale Gaussians (range: 1000-5000)
   densify_from_iter: 500      # start densification after this many mapping iters (range: 100-1000)
@@ -115,12 +113,7 @@ model_params:
 pipeline_params:
   convert_SHs_python: False   # compute SH colors in Python instead of CUDA
   compute_cov3D_python: False # compute 3D covariance in Python
-
-# ---- Surface-aware Depth ----
-surface_depth:
-  use_surface_depth: False     # enable SA depth correction in CUDA renderer
-  depth_type: "median"         # "expected" | "median" | "surface_aware" (replaces depth_ratio)
-  dist_type: "original"        # "original" | "surface_aware"
+  depth_ratio: 1.0            # 1 = median depth (bounded/indoor scenes like Replica), 0 = expected depth (unbounded/outdoor)
 
 # ---- VO Prior (DPVO monocular visual odometry) ----
 VOPrior:
@@ -131,7 +124,7 @@ VOPrior:
   tracking_itr_fallback: 100  # tracking iteration count without DPVO (range: 80-150)
   flow_quality_thresh: 1.5    # [deprecated] quality gate removed — DPVO trusted when initialized
   dpvo_queue_timeout: 0.5     # max seconds to wait for DPVO result per frame
-  dpvo_device_id: 1           # CUDA device for DPVO. With CUDA_VISIBLE_DEVICES=1,0: cuda:1→GPU0(DPVO), cuda:0→GPU1(main)
+  dpvo_device_id: 0           # GPU device for DPVO subprocess (0 = share with main, 1 = dedicated second GPU)
 
 # ---- DPVO Network Configuration ----
 DPVO:

@@ -95,10 +95,7 @@ def get_loss_mapping(
     viewpoint,
     opacity,
     initialization=False,
-    iteration_count=None,
     rend_normal=None,
-    surf_normal=None,
-    rend_dist=None,
     gt_normal_cam=None,
     gt_normal_mask=None,
     apply_normal=True,
@@ -114,34 +111,23 @@ def get_loss_mapping(
 
     opt = config["opt_params"]
     lambda_normal = opt.get("lambda_normal", 0.0)
-    lambda_dist = opt.get("lambda_dist", 0.0)
-    normal_start = opt.get("normal_start_iter", 7000)
-    dist_start = opt.get("dist_start_iter", 3000)
     normal_loss_type = opt.get("normal_loss_type", "surf")
 
-    if lambda_dist > 0 and rend_dist is not None and iteration_count is not None:
-        if iteration_count >= dist_start:
-            loss = loss + lambda_dist * rend_dist.mean()
-
-    if lambda_normal > 0 and rend_normal is not None and iteration_count is not None and apply_normal:
-        if iteration_count >= normal_start:
-            if normal_loss_type == "gt" and gt_normal_cam is not None:
-                c2w_rot = viewpoint.world_view_transform[:3, :3].T
-                gt_normal_world = (c2w_rot @ gt_normal_cam.view(3, -1)).view(
-                    3, *depth.shape[1:]
-                )
-                gt_normal_world = torch.nn.functional.normalize(
-                    gt_normal_world, dim=0
-                )
-                if gt_normal_mask is not None:
-                    mask = gt_normal_mask.view(1, *depth.shape[1:])
-                    normal_error = (1 - (rend_normal * gt_normal_world * mask).sum(dim=0))[None]
-                else:
-                    normal_error = (1 - (rend_normal * gt_normal_world).sum(dim=0))[None]
-                loss = loss + lambda_normal * normal_error.mean()
-            elif normal_loss_type == "surf" and surf_normal is not None:
-                normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
-                loss = loss + lambda_normal * normal_error.mean()
+    if lambda_normal > 0 and rend_normal is not None and apply_normal:
+        if normal_loss_type == "gt" and gt_normal_cam is not None:
+            c2w_rot = viewpoint.world_view_transform[:3, :3].T
+            gt_normal_world = (c2w_rot @ gt_normal_cam.view(3, -1)).view(
+                3, *depth.shape[1:]
+            )
+            gt_normal_world = torch.nn.functional.normalize(
+                gt_normal_world, dim=0
+            )
+            if gt_normal_mask is not None:
+                mask = gt_normal_mask.view(1, *depth.shape[1:])
+                normal_error = (1 - (rend_normal * gt_normal_world * mask).sum(dim=0))[None]
+            else:
+                normal_error = (1 - (rend_normal * gt_normal_world).sum(dim=0))[None]
+            loss = loss + lambda_normal * normal_error.mean()
 
     return loss
 

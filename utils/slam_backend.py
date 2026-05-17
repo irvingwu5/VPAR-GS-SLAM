@@ -189,11 +189,7 @@ class BackEnd(mp.Process):
                 viewpoint = viewpoint_stack[cam_idx]
                 keyframes_opt.append(viewpoint)
                 render_pkg = render(
-                    viewpoint,
-                    self.gaussians,
-                    self.pipeline_params,
-                    self.background,
-                    surf=self.need_surf,
+                    viewpoint, self.gaussians, self.pipeline_params, self.background
                 )
                 (
                     image,
@@ -219,10 +215,6 @@ class BackEnd(mp.Process):
                     depth,
                     viewpoint,
                     opacity,
-                    iteration_count=self.iteration_count,
-                    rend_normal=render_pkg["rend_normal"],
-                    surf_normal=render_pkg["surf_normal"],
-                    rend_dist=render_pkg["rend_dist"],
                     gt_normal_cam=viewpoint.normal,
                     gt_normal_mask=viewpoint.normal_mask,
                     apply_normal=_ >= self.normal_start and (self.normal_apply_iters == 0 or _ < self.normal_start + self.normal_apply_iters),
@@ -235,11 +227,7 @@ class BackEnd(mp.Process):
             for cam_idx in torch.randperm(len(random_viewpoint_stack))[:2]:
                 viewpoint = random_viewpoint_stack[cam_idx]
                 render_pkg = render(
-                    viewpoint,
-                    self.gaussians,
-                    self.pipeline_params,
-                    self.background,
-                    surf=self.need_surf,
+                    viewpoint, self.gaussians, self.pipeline_params, self.background
                 )
                 (
                     image,
@@ -264,10 +252,6 @@ class BackEnd(mp.Process):
                     depth,
                     viewpoint,
                     opacity,
-                    iteration_count=self.iteration_count,
-                    rend_normal=render_pkg["rend_normal"],
-                    surf_normal=render_pkg["surf_normal"],
-                    rend_dist=render_pkg["rend_dist"],
                     gt_normal_cam=viewpoint.normal,
                     gt_normal_mask=viewpoint.normal_mask,
                     apply_normal=_ >= self.normal_start and (self.normal_apply_iters == 0 or _ < self.normal_start + self.normal_apply_iters),

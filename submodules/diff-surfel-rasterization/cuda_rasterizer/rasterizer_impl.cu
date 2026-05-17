@@ -175,8 +175,6 @@ CudaRasterizer::ImageState CudaRasterizer::ImageState::fromChunk(char*& chunk, s
 	obtain(chunk, img.accum_alpha, N * 3, 128);
 	obtain(chunk, img.n_contrib, N * 2, 128);
 	obtain(chunk, img.ranges, N, 128);
-	obtain(chunk, img.m_media_depth, N, 128);
-	obtain(chunk, img.depth_std, N, 128);
 	return img;
 }
 
@@ -222,8 +220,7 @@ int CudaRasterizer::Rasterizer::forward(
 	float* out_others,
 	int* radii,
 	int* n_touched,
-	bool debug,
-	bool use_sa)
+	bool debug)
 {
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
@@ -343,10 +340,7 @@ int CudaRasterizer::Rasterizer::forward(
 		background,
 		out_color,
 		out_others,
-		n_touched,
-		use_sa,
-		imgState.m_media_depth,
-		imgState.depth_std), debug)
+		n_touched), debug)
 
 	return num_rendered;
 }
@@ -386,8 +380,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dscale,
 	float* dL_drot,
 	float* dL_dtau,
-	bool debug,
-	bool use_sa)
+	bool debug)
 {
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
 	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
@@ -431,10 +424,7 @@ void CudaRasterizer::Rasterizer::backward(
 		(float3*)dL_dmean2D,
 		dL_dnormal,
 		dL_dopacity,
-		dL_dcolor,
-		use_sa,
-		imgState.m_media_depth,
-		imgState.depth_std), debug)
+		dL_dcolor), debug)
 
 	// Take care of the rest of preprocessing. Was the precomputed covariance
 	// given to us or a scales/rot pair? If precomputed, pass that. If not,

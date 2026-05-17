@@ -136,9 +136,6 @@ class SLAM:
         self.save_dir = save_dir
         model_params = munchify(config["model_params"])
         opt_params = munchify(config["opt_params"])
-        # Merge surface_depth config block into pipeline_params for unified access
-        if "surface_depth" in config:
-            config["pipeline_params"]["surface_depth"] = config["surface_depth"]
         pipeline_params = munchify(config["pipeline_params"])
         self.model_params, self.opt_params, self.pipeline_params = (
             model_params,

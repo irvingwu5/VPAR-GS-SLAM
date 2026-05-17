@@ -73,7 +73,6 @@ def render(
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
         debug=False,
-        use_sa=getattr(pipe.surface_depth, 'use_surface_depth', False) if hasattr(pipe, 'surface_depth') else False,
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
@@ -154,17 +153,11 @@ def render(
 
     # get depth distortion map
     render_dist = allmap[6:7]
-
-    # Select depth source based on depth_type
-    sd = pipe.surface_depth if hasattr(pipe, 'surface_depth') else None
-    depth_type = sd.depth_type if sd is not None else 'expected'
-
-    if depth_type == "surface_aware":
-        surf_depth = render_depth_expected  # D/alpha, SA-corrected when use_sa=True
-    elif depth_type == "median":
-        surf_depth = render_depth_median
-    else:  # "expected"
-        surf_depth = render_depth_expected
+    # psedo surface attributes
+    # surf depth is either median or expected by setting depth_ratio to 1 or 0
+    # for bounded scene, use median depth, i.e., depth_ratio = 1;
+    # for unbounded scene, use expected depth, i.e., depth_ration = 0, to reduce disk anliasing.
+    surf_depth = render_depth_expected * (1 - pipe.depth_ratio) + (pipe.depth_ratio) * render_depth_median
 
     if surf: #渲染深度图计算出来的法线图，宏观几何，后续让每个surfels都朝向对应的宏观法线方向，
         surf_normal = depth_to_normal(viewpoint_camera, surf_depth) #已经转换到了世界坐标系下，assume the depth points form the 'surface' and generate psudo surface normal for regularizations.
@@ -212,6 +205,6 @@ render_normal
     含义：来自 rasterizer 的输出（allmap[2:5]），表示每个像素由高斯元累积得到的法线分量（最初在视图/相机坐标系下）。这些法线是按贡献加权累积的，可能未归一化。
     转换：用相机的世界视图旋转矩阵将视图空间法线变换到世界坐标系（通过矩阵乘法和维度重排）。
 surf_normal  
-    含义：由深度图推导得到的“伪表面法线”，表示宏观几何方向（用于正则化）。深度图 surf_depth 由 surface_depth.depth_type 选择（"expected" / "median" / "surface_aware"）。
+    含义：由深度图推导得到的“伪表面法线”，表示宏观几何方向（用于正则化）。深度图 surf_depth 是期望深度（期望深度图是每个像素沿视线的加权平均深度。简单来说，它表示“从相机看过去，所有被该像素贡献的高斯元的平均深度”）与中值深度按 pipe.depth_ratio 混合得到的。
     计算：调用 depth_to_normal(viewpoint_camera, surf_depth)（返回世界坐标系下的法线，通常通过深度的空间梯度或将临近像素反投影到 3D 再做叉乘得到），然后重排通道并乘以 render_alpha.detach()（按累积 alpha 加权，用于与 rasterizer 的法线匹配）
 '''
