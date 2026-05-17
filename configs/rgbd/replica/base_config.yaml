@@ -91,7 +91,7 @@ opt_params:
   percent_dense: 0.01         # fraction of Gaussians with top gradients selected for densification (range: 0.005-0.02)
   lambda_dssim: 0.2           # SSIM loss weight in RGB loss (1-lambda_dssim = L1 weight, range: 0.1-0.3)
   lambda_normal: 0.0         # normal consistency loss weight (2DGS: 0.0,modify in ablation yaml files)
-  normal_loss_type: "gt"      # "gt": precomputed GT normals (fast); "surf": depth-to-normal from rendered depth (original)
+  lambda_dist: 0.0           # depth distortion loss weight (2DGS: 0.0, modify in ablation yaml files)
   normal_start_iter: 0         # enable normal loss after this many mapping iters
   normal_apply_iters: 1       # only apply normal loss in first N mapping iters per keyframe (1 = once, like 4DTAM's itr==0)
   densification_interval: 100  # apply densify/prune every N mapping iters (range: 50-200)
@@ -125,6 +125,9 @@ VOPrior:
   flow_quality_thresh: 1.5    # [deprecated] quality gate removed — DPVO trusted when initialized
   dpvo_queue_timeout: 0.5     # max seconds to wait for DPVO result per frame
   dpvo_device_id: 0           # GPU device for DPVO subprocess (0 = share with main, 1 = dedicated second GPU)
+  candidate_selection_enable: True  # render-based arbitration: pick best initial pose from {previous, CV, DPVO} by render loss
+  candidate_lambda_depth: 1.0       # depth loss weight in candidate scoring
+  candidate_min_opacity_ratio: 0.05 # reject candidate if rendered opacity coverage below this
 
 # ---- DPVO Network Configuration ----
 DPVO:
@@ -136,6 +139,25 @@ DPVO:
   PATCH_LIFETIME: 13         # how many frames a patch-pair edge survives (paper default: 13)
   REMOVAL_WINDOW: 22         # after this many frames inactive edges/patches are removed (paper default: 22)
   KEYFRAME_THRESH: 15.0      # minimum flow (pixels) between keyframes for DPVO (paper default: 15.0)
+
+# ---- PAR-RSKM (Pose-Aware Replay Random Sampling Keyframe Mapping) ----
+PAR_RSKM:
+  enabled: False               # enable PAR weighted keyframe replay (requires VOPrior.enabled=True)
+  beta_pose: 1.0               # sensitivity to pose error, higher = stricter reliability decay
+  eps: 1.0e-6                  # numerical stability for (r+eps)^gamma
+  gamma: 1.5                   # sharpening coefficient, >1 amplifies high/low reliability gap
+  reliability_threshold: 0.05  # frames with reliability below this are excluded from sampling
+  min_weight: 0.25             # minimum loss weight for selected low-reliability frames
+  max_weight: 1.0              # maximum loss weight for selected high-reliability frames
+  default_reliability: 1.0     # fallback reliability for frames without PAR metadata (DPVO warmup/failure)
+  current_frame_interval: 4    # force-select current frame every N samples
+  seed: 42                     # RNG seed for PAR sampling reproducibility
+  log_interval: 50             # log PAR statistics every N mapping iterations
+  debug_log: False             # enable verbose per-iteration PAR logging
+  use_temporal_bins: False     # enable temporal bin stratification (recent/middle/old)
+  recent_bin_prob: 0.5
+  middle_bin_prob: 0.3
+  old_bin_prob: 0.2
 
 # ---- FFT Mask (FrontEnd frequency analysis for Gaussian placement density and scale) ----
 fftmask:

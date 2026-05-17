@@ -56,7 +56,12 @@ class FrontEnd(mp.Process):
         self.vo_prior_flow_thresh = vop.get("flow_quality_thresh", 1.5)
         self.vo_prior = None
         self._last_two_metric_c2w = []  # for constant_velocity model
-        self._use_dpvo_this_frame = False  # tracking() sets this
+        self._use_dpvo_this_frame = False  # tracking() sets
+
+        # Candidate selection: render-based arbitration of initial poses
+        self.candidate_selection_enable = vop.get("candidate_selection_enable", False)
+        self.candidate_lambda_depth = float(vop.get("candidate_lambda_depth", 1.0))
+        self.candidate_min_opacity_ratio = float(vop.get("candidate_min_opacity_ratio", 0.05))
 
     def set_hyperparams(self):
         self.save_dir = self.config["Results"]["save_dir"]
@@ -103,6 +108,90 @@ class FrontEnd(mp.Process):
         if cv_c2w is not None:
             return cv_c2w
         return None
+
+    # ========================================================================
+    # Candidate Selection: render-based arbitration (ported from FVO-GS-SLAM)
+    # ========================================================================
+
+    def _build_candidates(self, prev_cam, vo_success, est_c2w):
+        """Build list of initial pose candidates for render arbitration."""
+        candidates = []
+        # 1. Previous frame pose
+        if prev_cam is not None:
+            prev_c2w = self._camera_c2w(prev_cam)
+            candidates.append({"name": "previous", "c2w": prev_c2w, "valid": True})
+        # 2. Constant velocity
+        cv_c2w = self._build_constant_velocity_c2w()
+        if cv_c2w is not None:
+            candidates.append({"name": "constant_velocity", "c2w": cv_c2w, "valid": True})
+        # 3. External VO (DPVO)
+        if vo_success and est_c2w is not None:
+            candidates.append({"name": "external_vo", "c2w": est_c2w, "valid": True})
+        return candidates
+
+    def _render_precheck(self, c2w, viewpoint):
+        """Lightweight render loss check for a candidate pose. No gradients, no optimizer."""
+        with torch.no_grad():
+            orig_R = viewpoint.R.clone()
+            orig_T = viewpoint.T.clone()
+            w2c = np.linalg.inv(c2w)
+            new_R = torch.from_numpy(w2c[:3, :3]).float().cuda()
+            new_T = torch.from_numpy(w2c[:3, 3]).float().cuda()
+            viewpoint.update_RT(new_R, new_T)
+            viewpoint.cam_rot_delta.data.fill_(0)
+            viewpoint.cam_trans_delta.data.fill_(0)
+
+            render_pkg = render(
+                viewpoint, self.gaussians, self.pipeline_params, self.background)
+            image = render_pkg["render"]
+            depth = render_pkg["depth"]
+            opacity = render_pkg["opacity"]
+
+            gt_image = viewpoint.original_image.cuda()
+            _, h, w = gt_image.shape
+            rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"]
+            rgb_pixel_mask = (gt_image.sum(dim=0) > rgb_boundary_threshold).view(1, h, w)
+            rgb_pixel_mask = rgb_pixel_mask * viewpoint.grad_mask
+            l1_rgb = (opacity * torch.abs(image * rgb_pixel_mask - gt_image * rgb_pixel_mask)).mean().item()
+
+            gt_depth = torch.from_numpy(viewpoint.depth).to(
+                dtype=torch.float32, device=image.device)[None]
+            depth_pixel_mask = (gt_depth > 0.01).view(*depth.shape)
+            opacity_mask = (opacity > 0.95).view(*depth.shape)
+            depth_mask = depth_pixel_mask * opacity_mask
+            n_valid = depth_mask.sum()
+            if n_valid > 0:
+                l1_depth = (torch.abs(depth * depth_mask - gt_depth * depth_mask).sum() / n_valid).item()
+            else:
+                l1_depth = float("inf")
+            opacity_ratio = opacity_mask.float().mean().item()
+
+            viewpoint.update_RT(orig_R, orig_T)
+
+        return {"l1_rgb": l1_rgb, "l1_depth": l1_depth, "opacity_ratio": opacity_ratio}
+
+    def _select_candidate(self, candidates, viewpoint):
+        """Select best candidate by render precheck score."""
+        best_cand = None
+        best_score = float("inf")
+        for cand in candidates:
+            if not cand.get("valid", True):
+                continue
+            metrics = self._render_precheck(cand["c2w"], viewpoint)
+            cand["metrics"] = metrics
+            if metrics["opacity_ratio"] < self.candidate_min_opacity_ratio:
+                cand["rejected"] = True
+                continue
+            score = (metrics["l1_rgb"]
+                     + self.candidate_lambda_depth * metrics["l1_depth"])
+            cand["score"] = score
+            if score < best_score:
+                best_score = score
+                best_cand = cand
+        if best_cand is None and candidates:
+            best_cand = candidates[0]
+            best_cand["fallback"] = True
+        return best_cand
 
     def add_new_keyframe(self, cur_frame_idx, depth=None, opacity=None, init=False):
         rgb_boundary_threshold = self.config["Training"]["rgb_boundary_threshold"]
@@ -178,6 +267,8 @@ class FrontEnd(mp.Process):
     def tracking(self, cur_frame_idx, viewpoint):
         # ---- Step 1: Determine initial pose ----
         use_dpvo = False
+        dpvo_ok = False
+        dpvo_c2w = None
         if self.vo_prior_enabled and self.vo_prior_type == "dpvo":
             if cur_frame_idx > self.vo_prior_warmup:
                 prev_c2w = self._camera_c2w(
@@ -187,15 +278,29 @@ class FrontEnd(mp.Process):
                 dpvo_ok, dpvo_c2w, dpvo_info = self.vo_prior.track(
                     rgb_np, prev_c2w
                 )
-                cv_c2w = self._build_constant_velocity_c2w()
-                best_c2w = self._select_initial_c2w(
-                    dpvo_c2w if dpvo_ok else None,
-                    dpvo_info.get("flow_quality"),
-                    cv_c2w,
-                )
-                use_dpvo = self._use_dpvo_this_frame
-                if best_c2w is None:
-                    best_c2w = prev_c2w
+                prev_cam = self.cameras[cur_frame_idx - 1]
+
+                if self.candidate_selection_enable and self.gaussians is not None:
+                    # Render-based arbitration: try all candidates, pick lowest loss
+                    candidates = self._build_candidates(prev_cam, dpvo_ok, dpvo_c2w)
+                    if candidates:
+                        selected = self._select_candidate(candidates, viewpoint)
+                        best_c2w = selected["c2w"]
+                        use_dpvo = (selected.get("name") == "external_vo")
+                    else:
+                        best_c2w = prev_c2w
+                        use_dpvo = False
+                else:
+                    # Simple priority selection (original behavior)
+                    cv_c2w = self._build_constant_velocity_c2w()
+                    best_c2w = self._select_initial_c2w(
+                        dpvo_c2w if dpvo_ok else None,
+                        dpvo_info.get("flow_quality"),
+                        cv_c2w,
+                    )
+                    use_dpvo = self._use_dpvo_this_frame
+                    if best_c2w is None:
+                        best_c2w = prev_c2w
 
                 w2c = np.linalg.inv(best_c2w)
                 new_R = torch.from_numpy(w2c[:3, :3]).float().cuda()
@@ -222,6 +327,8 @@ class FrontEnd(mp.Process):
             # Original behavior: previous frame pose
             prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
             viewpoint.update_RT(prev.R, prev.T)
+
+        init_c2w = self._camera_c2w(viewpoint)
 
         # ---- Step 2: Set up optimizer ----
         opt_params = []
@@ -262,6 +369,8 @@ class FrontEnd(mp.Process):
         )
 
         pose_optimizer = torch.optim.Adam(opt_params)
+        best_T = None
+        best_loss = float("inf")
         for tracking_itr in range(itr_num):
             render_pkg = render(
                 viewpoint, self.gaussians, self.pipeline_params, self.background
@@ -280,6 +389,10 @@ class FrontEnd(mp.Process):
             with torch.no_grad():
                 pose_optimizer.step()
                 converged = update_pose(viewpoint)
+                current_loss = loss_tracking.item()
+                if current_loss < best_loss:
+                    best_loss = current_loss
+                    best_T = viewpoint.T.clone()
 
             if tracking_itr % 10 == 0:
                 self.q_main2vis.put(
@@ -294,7 +407,9 @@ class FrontEnd(mp.Process):
             if converged:
                 break
 
-        # ---- Step 4: Update state for next frame ----
+        # ---- Step 4: Restore best pose and update state ----
+        if best_T is not None:
+            viewpoint.T = best_T.clone()
         self.median_depth = get_median_depth(depth, opacity)
 
         # Update metric C2W history for constant_velocity model
@@ -302,6 +417,28 @@ class FrontEnd(mp.Process):
         self._last_two_metric_c2w.append(final_c2w)
         if len(self._last_two_metric_c2w) > 2:
             self._last_two_metric_c2w.pop(0)
+
+        # ---- PAR-RSKM: save pose consistency metadata ----
+        if self.config.get("PAR_RSKM", {}).get("enabled", False):
+            from utils.par_rskm import compute_pose_delta_metrics
+
+            with torch.no_grad():
+                viewpoint.vo_init_c2w = init_c2w
+                viewpoint.render_opt_c2w = final_c2w
+
+                trans_err, rot_err = compute_pose_delta_metrics(
+                    viewpoint.vo_init_c2w, viewpoint.render_opt_c2w
+                )
+                viewpoint.par_pose_trans_error = trans_err
+                viewpoint.par_pose_rot_error_deg = rot_err
+
+                beta_pose = self.config["PAR_RSKM"].get("beta_pose", 1.0)
+                pose_error = trans_err + rot_err / 30.0
+                viewpoint.par_reliability = float(np.exp(-beta_pose * pose_error))
+
+            viewpoint.par_replay_count = 0
+            viewpoint.par_last_replay_iter = -1
+            viewpoint.par_initialized = True
 
         return render_pkg
 

@@ -42,6 +42,37 @@ class BackEnd(mp.Process):
         self.fft_masks = {}
         self.error_mask_densifier = None
 
+        # ===== PAR-RSKM =====
+        par_cfg = config.get("PAR_RSKM", {})
+        self.use_par_rskm = par_cfg.get("enabled", False)
+        self.par_config = {}
+        self._par_reliabilities = {}
+        self._par_rskm_log_counter = 0
+        self._par_rskm_stats = None
+        if self.use_par_rskm:
+            self.par_config = {
+                "beta_pose": float(par_cfg.get("beta_pose", 1.0)),
+                "eps": float(par_cfg.get("eps", 1.0e-6)),
+                "gamma": float(par_cfg.get("gamma", 1.5)),
+                "tau_r": float(par_cfg.get("reliability_threshold", 0.05)),
+                "w_min": float(par_cfg.get("min_weight", 0.25)),
+                "w_max": float(par_cfg.get("max_weight", 1.0)),
+                "default_reliability": float(par_cfg.get("default_reliability", 1.0)),
+                "log_interval": int(par_cfg.get("log_interval", 50)),
+            }
+            self._par_rskm_debug_log = par_cfg.get("debug_log", False)
+            self._par_use_temporal_bins = par_cfg.get("use_temporal_bins", False)
+            self._par_bin_probs = {
+                "recent": float(par_cfg.get("recent_bin_prob", 0.5)),
+                "middle": float(par_cfg.get("middle_bin_prob", 0.3)),
+                "old": float(par_cfg.get("old_bin_prob", 0.2)),
+            }
+            rskm_seed = par_cfg.get("seed", config.get("Experiment", {}).get("seed", 42))
+            self.par_rskm_rng = random.Random(rskm_seed)
+            Log(f"[PAR-RSKM] enabled beta={self.par_config['beta_pose']} "
+                f"gamma={self.par_config['gamma']} tau_r={self.par_config['tau_r']} "
+                f"temporal_bins={self._par_use_temporal_bins}")
+
     def set_hyperparams(self):
         self.save_results = self.config["Results"]["save_results"]
 
@@ -67,11 +98,7 @@ class BackEnd(mp.Process):
             if "single_thread" in self.config["Dataset"]
             else False
         )
-        lambda_normal = self.config["opt_params"].get("lambda_normal", 0.0)
-        normal_loss_type = self.config["opt_params"].get("normal_loss_type", "surf")
-        self.use_normal = lambda_normal > 0
-        self.normal_loss_type = normal_loss_type
-        self.need_surf = (normal_loss_type == "surf") and (lambda_normal > 0)
+        self.use_normal = self.config["opt_params"].get("lambda_normal", 0.0) > 0
         self.normal_apply_iters = self.config["opt_params"].get("normal_apply_iters", 1)
         self.normal_start = self.config["opt_params"].get("normal_start_iter", 0)
 
@@ -88,6 +115,8 @@ class BackEnd(mp.Process):
         self.initialized = not self.monocular
         self.keyframe_optimizers = None
         self.fft_masks = {}
+        self._par_reliabilities = {}
+        self._par_rskm_stats = None
 
         # remove all gaussians
         self.gaussians.prune_points(self.gaussians.unique_kfIDs >= 0)
@@ -173,21 +202,34 @@ class BackEnd(mp.Process):
                 continue
             random_viewpoint_stack.append(viewpoint)
 
+        current_kf_id = current_window[-1] if len(current_window) > 0 else None
+
         for _ in range(iters):
             self.iteration_count += 1
             self.last_sent += 1
 
-            loss_mapping = 0
             viewspace_point_tensor_acm = []
             visibility_filter_acm = []
             radii_acm = []
             n_touched_acm = []
 
-            keyframes_opt = []
+            # ---- 选择监督帧 ----
+            if self.use_par_rskm and not prune:
+                num_samples = len(current_window) + 2
+                supervised_kf_ids = self._select_par_rskm_keyframes(current_window, num_samples)
+                supervision_pairs = [(kf_id, self.viewpoints[kf_id]) for kf_id in supervised_kf_ids]
+                keyframes_opt = viewpoint_stack[:]
+            else:
+                supervision_pairs = [(kf_idx, self.viewpoints[kf_idx]) for kf_idx in current_window]
+                for cam_idx in torch.randperm(len(random_viewpoint_stack))[:2]:
+                    supervision_pairs.append((None, random_viewpoint_stack[cam_idx]))
+                keyframes_opt = viewpoint_stack[:]
 
-            for cam_idx in range(len(current_window)):
-                viewpoint = viewpoint_stack[cam_idx]
-                keyframes_opt.append(viewpoint)
+            apply_normal = _ >= self.normal_start and (
+                self.normal_apply_iters == 0 or _ < self.normal_start + self.normal_apply_iters
+            )
+
+            for kf_idx, viewpoint in supervision_pairs:
                 render_pkg = render(
                     viewpoint, self.gaussians, self.pipeline_params, self.background
                 )
@@ -209,66 +251,51 @@ class BackEnd(mp.Process):
                     render_pkg["n_touched"],
                 )
 
-                loss_mapping += get_loss_mapping(
+                rend_dist = render_pkg["rend_dist"]
+
+                loss_view = get_loss_mapping(
                     self.config,
                     image,
                     depth,
                     viewpoint,
                     opacity,
+                    rend_normal=render_pkg.get("rend_normal", None),
+                    rend_dist=rend_dist,
                     gt_normal_cam=viewpoint.normal,
                     gt_normal_mask=viewpoint.normal_mask,
-                    apply_normal=_ >= self.normal_start and (self.normal_apply_iters == 0 or _ < self.normal_start + self.normal_apply_iters),
+                    apply_normal=apply_normal,
                 )
+
+                # ---- PAR-RSKM: apply replay loss weight ----
+                if (self.use_par_rskm
+                        and kf_idx is not None
+                        and kf_idx != current_kf_id):
+                    from utils.par_rskm import compute_replay_weight
+                    r = getattr(viewpoint, "par_reliability", None)
+                    w = compute_replay_weight(
+                        r,
+                        min_weight=self.par_config.get("w_min", 0.25),
+                        max_weight=self.par_config.get("w_max", 1.0),
+                    )
+                    loss_view = w * loss_view
+
+                loss_view.backward()
+
                 viewspace_point_tensor_acm.append(viewspace_point_tensor)
                 visibility_filter_acm.append(visibility_filter)
                 radii_acm.append(radii)
-                n_touched_acm.append(n_touched)
+                n_touched_acm.append((kf_idx, n_touched))
 
-            for cam_idx in torch.randperm(len(random_viewpoint_stack))[:2]:
-                viewpoint = random_viewpoint_stack[cam_idx]
-                render_pkg = render(
-                    viewpoint, self.gaussians, self.pipeline_params, self.background
-                )
-                (
-                    image,
-                    viewspace_point_tensor,
-                    visibility_filter,
-                    radii,
-                    depth,
-                    opacity,
-                    n_touched,
-                ) = (
-                    render_pkg["render"],
-                    render_pkg["viewspace_points"],
-                    render_pkg["visibility_filter"],
-                    render_pkg["radii"],
-                    render_pkg["depth"],
-                    render_pkg["opacity"],
-                    render_pkg["n_touched"],
-                )
-                loss_mapping += get_loss_mapping(
-                    self.config,
-                    image,
-                    depth,
-                    viewpoint,
-                    opacity,
-                    gt_normal_cam=viewpoint.normal,
-                    gt_normal_mask=viewpoint.normal_mask,
-                    apply_normal=_ >= self.normal_start and (self.normal_apply_iters == 0 or _ < self.normal_start + self.normal_apply_iters),
-                )
-                viewspace_point_tensor_acm.append(viewspace_point_tensor)
-                visibility_filter_acm.append(visibility_filter)
-                radii_acm.append(radii)
+                del render_pkg
+                torch.cuda.empty_cache()
 
-            loss_mapping.backward()
             gaussian_split = False
             ## Deinsifying / Pruning Gaussians
             with torch.no_grad():
                 self.occ_aware_visibility = {}
-                for idx in range((len(current_window))):
-                    kf_idx = current_window[idx]
-                    n_touched = n_touched_acm[idx]
-                    self.occ_aware_visibility[kf_idx] = (n_touched > 0).long()
+                for kf_idx, n_touched in n_touched_acm:
+                    if kf_idx is not None and kf_idx in current_window_set:
+                        self.occ_aware_visibility[kf_idx] = (n_touched > 0).long()
 
                 # # compute the visibility of the gaussians
                 # # Only prune on the last iteration and when we have full window
@@ -335,7 +362,7 @@ class BackEnd(mp.Process):
                             kf_fft_masks = self.fft_masks.get(kf_idx)
                             render_pkg = render(
                                 vp, self.gaussians, self.pipeline_params,
-                                self.background, surf=self.need_surf,
+                                self.background,
                             )
                             error_mask, _ = self.error_mask_densifier.compute_error_mask(
                                 render_pkg, vp
@@ -387,7 +414,164 @@ class BackEnd(mp.Process):
                     if viewpoint.uid == 0:
                         continue
                     update_pose(viewpoint)
+
+        # ---- PAR-RSKM stats summary ----
+        if (self.use_par_rskm
+                and self._par_rskm_stats is not None
+                and self._par_rskm_stats["reliability_count"] > 0):
+            st = self._par_rskm_stats
+            mean_r = st["reliability_sum"] / st["reliability_count"]
+            mean_w = st["weight_sum"] / st["weight_count"] if st["weight_count"] > 0 else 1.0
+            if self._par_rskm_debug_log:
+                Log(f"[PAR-RSKM][Stats] current={st['num_current_selected']} "
+                    f"replay={st['num_replay_selected']} "
+                    f"fallback={st['num_replay_fallback']} "
+                    f"rejected={st['num_replay_rejected']} "
+                    f"mean_r={mean_r:.3f} mean_w={mean_w:.3f} "
+                    f"pool={len(self.viewpoints)}kfs")
+            self._par_rskm_stats = None
+
         return gaussian_split
+
+    # ========================================================================
+    # ========================================================================
+    # 6.1 RSKM (Random Sampling Keyframe Mapping) — vanilla fallback
+    # ========================================================================
+    def _select_rskm_keyframes(self, current_window, num_samples):
+        active_kf_ids = sorted(list(self.viewpoints.keys()))
+        current_kf_id = current_window[-1] if len(current_window) > 0 else None
+
+        selected = []
+        for s in range(num_samples):
+            iter_id = self.iteration_count + s
+            if iter_id % self.config.get("PAR_RSKM", {}).get("current_frame_interval", 4) == 0:
+                if current_kf_id is not None and current_kf_id in self.viewpoints:
+                    selected.append(current_kf_id)
+                    continue
+            if len(active_kf_ids) <= 1 and current_kf_id is not None:
+                selected.append(current_kf_id)
+            elif len(active_kf_ids) > 0:
+                selected.append(self.par_rskm_rng.choice(active_kf_ids))
+            elif current_kf_id is not None:
+                selected.append(current_kf_id)
+        return selected
+
+    # ========================================================================
+    # 6.2 PAR-RSKM: Pose-Aware Random Keyframe Replay
+    # ========================================================================
+    def _select_par_rskm_keyframes(self, current_window, num_samples):
+        from utils.par_rskm import (
+            compute_reliabilities_batch, compute_par_sampling_score,
+            select_par_keyframes, select_par_keyframes_binned,
+        )
+
+        current_kf_id = current_window[-1] if len(current_window) > 0 else None
+
+        # Step 1: Update reliabilities for newly initialized viewpoints
+        newly_initialized = any(
+            getattr(vp, "par_initialized", False)
+            and getattr(vp, "par_reliability", None) is None
+            for vp in self.viewpoints.values()
+        )
+        if newly_initialized:
+            self._par_reliabilities = compute_reliabilities_batch(
+                self.viewpoints, self.par_config
+            )
+            if self._par_rskm_debug_log:
+                rel_vals = list(self._par_reliabilities.values())
+                if rel_vals:
+                    Log(f"[PAR-RSKM] reliabilities: n={len(rel_vals)} "
+                        f"mean={sum(rel_vals)/len(rel_vals):.4f} "
+                        f"min={min(rel_vals):.4f} max={max(rel_vals):.4f}")
+
+        reliabilities = self._par_reliabilities
+        if not reliabilities:
+            if self._par_rskm_debug_log:
+                Log(f"[PAR-RSKM] no reliabilities yet (pool={len(self.viewpoints)}), "
+                    f"fallback to vanilla uniform")
+            return self._select_rskm_keyframes(current_window, num_samples)
+
+        # Step 2: Compute sampling scores
+        scores = {}
+        active_kf_ids = sorted(list(self.viewpoints.keys()))
+        for kf_id in active_kf_ids:
+            vp = self.viewpoints[kf_id]
+            r = reliabilities.get(kf_id, self.par_config["default_reliability"])
+            replay_cnt = getattr(vp, "par_replay_count", 0)
+            scores[kf_id] = compute_par_sampling_score(
+                r, replay_count=replay_cnt,
+                threshold=self.par_config["tau_r"],
+                gamma=self.par_config["gamma"],
+                eps=self.par_config["eps"],
+            )
+
+        # Step 3: Weighted selection
+        interval = self.config.get("PAR_RSKM", {}).get("current_frame_interval", 4)
+        if self._par_use_temporal_bins:
+            selected, fallback_used = select_par_keyframes_binned(
+                self.viewpoints, current_window, num_samples,
+                scores, self._par_bin_probs, self.par_rskm_rng,
+                interval, self.iteration_count,
+            )
+        else:
+            selected, fallback_used = select_par_keyframes(
+                self.viewpoints, current_window, num_samples,
+                scores, self.par_rskm_rng,
+                interval, self.iteration_count,
+            )
+
+        # Step 4: Update replay counts
+        for kf_id in selected:
+            if kf_id != current_kf_id and kf_id in self.viewpoints:
+                vp = self.viewpoints[kf_id]
+                vp.par_replay_count = getattr(vp, "par_replay_count", 0) + 1
+                vp.par_last_replay_iter = self.iteration_count
+
+        # Step 5: Accumulate stats
+        self._par_rskm_log_counter += 1
+        if self._par_rskm_stats is None:
+            self._par_rskm_stats = {
+                "num_current_selected": 0, "num_replay_selected": 0,
+                "num_replay_fallback": 0, "num_replay_rejected": 0,
+                "reliability_sum": 0.0, "reliability_count": 0,
+                "weight_sum": 0.0, "weight_count": 0,
+            }
+
+        for kf_id in selected:
+            if kf_id == current_kf_id:
+                self._par_rskm_stats["num_current_selected"] += 1
+            else:
+                self._par_rskm_stats["num_replay_selected"] += 1
+                r = reliabilities.get(kf_id, self.par_config["default_reliability"])
+                self._par_rskm_stats["reliability_sum"] += r
+                self._par_rskm_stats["reliability_count"] += 1
+                w = max(self.par_config["w_min"], min(self.par_config["w_max"], r))
+                self._par_rskm_stats["weight_sum"] += w
+                self._par_rskm_stats["weight_count"] += 1
+        if fallback_used:
+            self._par_rskm_stats["num_replay_fallback"] += 1
+
+        tau_r = self.par_config["tau_r"]
+        for kf_id in active_kf_ids:
+            r = reliabilities.get(kf_id, self.par_config["default_reliability"])
+            if r < tau_r:
+                self._par_rskm_stats["num_replay_rejected"] += 1
+
+        # Periodic log
+        if self._par_rskm_debug_log and self._par_rskm_log_counter % self.par_config.get("log_interval", 50) == 0:
+            rel_values = [v for v in reliabilities.values() if v is not None]
+            mean_r = sum(rel_values) / max(len(rel_values), 1) if rel_values else 0
+            sample_info = []
+            for kf_id in selected[:3]:
+                r = reliabilities.get(kf_id, 0)
+                s = scores.get(kf_id, 0)
+                rc = getattr(self.viewpoints.get(kf_id), "par_replay_count", 0)
+                sample_info.append(f"kf={kf_id} r={r:.3f} s={s:.4f} rc={rc}")
+            Log(f"[PAR-RSKM] candidates={len(active_kf_ids)} "
+                f"selected={len(selected)} mean_r={mean_r:.3f} "
+                + " | ".join(sample_info))
+
+        return selected
 
     def color_refinement(self):
         Log("Starting color refinement")
@@ -500,6 +684,13 @@ class BackEnd(mp.Process):
                         self.fft_masks = {
                             k: v for k, v in self.fft_masks.items() if k in keep_ids
                         }
+
+                    # ---- PAR-RSKM: compute reliabilities for new keyframe ----
+                    if self.use_par_rskm and len(self.viewpoints) >= 2:
+                        from utils.par_rskm import compute_reliabilities_batch
+                        self._par_reliabilities = compute_reliabilities_batch(
+                            self.viewpoints, self.par_config
+                        )
 
                     opt_params = []
                     frames_to_optimize = self.config["Training"]["pose_window"]
