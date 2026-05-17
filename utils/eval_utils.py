@@ -136,6 +136,7 @@ def eval_rendering(
     img_pred, img_gt, saved_frame_idx = [], [], []
     end_idx = len(frames) - 1 if iteration == "final" or "before_opt" else iteration
     psnr_array, ssim_array, lpips_array = [], [], []
+    depth_l1_array = []
     cal_lpips = LearnedPerceptualImagePatchSimilarity(
         net_type="alex", normalize=True
     ).to("cuda")
@@ -193,15 +194,25 @@ def eval_rendering(
         ssim_array.append(ssim_score.item())
         lpips_array.append(lpips_score.item())
 
+        # Depth L1: compare rendered depth vs GT depth on valid pixels
+        if "depth" in render_pkg and frame.depth is not None:
+            rend_depth = render_pkg["depth"].detach()
+            gt_depth = torch.from_numpy(frame.depth.astype(np.float32)).to(rend_depth.device)
+            valid_mask = gt_depth > 0.01
+            if valid_mask.sum() > 0:
+                depth_l1 = (torch.abs(rend_depth - gt_depth) * valid_mask).sum() / valid_mask.sum()
+                depth_l1_array.append(depth_l1.item())
+
     output = dict()
     output["mean_psnr"] = float(np.mean(psnr_array))
     output["mean_ssim"] = float(np.mean(ssim_array))
     output["mean_lpips"] = float(np.mean(lpips_array))
 
-    Log(
-        f'mean psnr: {output["mean_psnr"]}, ssim: {output["mean_ssim"]}, lpips: {output["mean_lpips"]}',
-        tag="Eval",
-    )
+    log_msg = f'mean psnr: {output["mean_psnr"]}, ssim: {output["mean_ssim"]}, lpips: {output["mean_lpips"]}'
+    if depth_l1_array:
+        output["mean_depth_l1"] = float(np.mean(depth_l1_array))
+        log_msg += f', depth_l1: {output["mean_depth_l1"]:.4f}'
+    Log(log_msg, tag="Eval")
 
     psnr_save_dir = os.path.join(save_dir, "psnr", str(iteration))
     mkdir_p(psnr_save_dir)

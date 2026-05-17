@@ -273,13 +273,14 @@ class SLAM:
                 save_depth=False,
                 save_normal=False,
             )
-            columns = ["tag", "psnr", "ssim", "lpips", "RMSE ATE", "FPS"]
+            columns = ["tag", "psnr", "ssim", "lpips", "depth_l1", "RMSE ATE", "FPS"]
             metrics_table = wandb.Table(columns=columns)
             metrics_table.add_data(
                 "Before",
                 rendering_result["mean_psnr"],
                 rendering_result["mean_ssim"],
                 rendering_result["mean_lpips"],
+                rendering_result.get("mean_depth_l1", 0),
                 ATE,
                 FPS,
             )
@@ -317,6 +318,7 @@ class SLAM:
                 rendering_result["mean_psnr"],
                 rendering_result["mean_ssim"],
                 rendering_result["mean_lpips"],
+                rendering_result.get("mean_depth_l1", 0),
                 ATE,
                 FPS,
             )

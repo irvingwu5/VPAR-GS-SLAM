@@ -96,6 +96,7 @@ def get_loss_mapping(
     opacity,
     initialization=False,
     rend_normal=None,
+    rend_dist=None,
     gt_normal_cam=None,
     gt_normal_mask=None,
     apply_normal=True,
@@ -111,10 +112,8 @@ def get_loss_mapping(
 
     opt = config["opt_params"]
     lambda_normal = opt.get("lambda_normal", 0.0)
-    normal_loss_type = opt.get("normal_loss_type", "surf")
-
     if lambda_normal > 0 and rend_normal is not None and apply_normal:
-        if normal_loss_type == "gt" and gt_normal_cam is not None:
+        if gt_normal_cam is not None:
             c2w_rot = viewpoint.world_view_transform[:3, :3].T
             gt_normal_world = (c2w_rot @ gt_normal_cam.view(3, -1)).view(
                 3, *depth.shape[1:]
@@ -128,6 +127,10 @@ def get_loss_mapping(
             else:
                 normal_error = (1 - (rend_normal * gt_normal_world).sum(dim=0))[None]
             loss = loss + lambda_normal * normal_error.mean()
+
+    lambda_dist = opt.get("lambda_dist", 0.0)
+    if lambda_dist > 0 and rend_dist is not None:
+        loss = loss + lambda_dist * rend_dist.mean()
 
     return loss
 

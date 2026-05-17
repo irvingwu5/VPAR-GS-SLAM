@@ -30,8 +30,15 @@ CUDA_VISIBLE_DEVICES="$GPU_ID" python slam.py \
   2>&1 | tee "$RESULT_DIR/B_AplusVO.log"
 
 echo ""
+echo "=== [G] F+PAR-RSKM: DPVO + PAR weighted keyframe replay ==="
+CUDA_VISIBLE_DEVICES="$GPU_ID" python slam.py \
+  --config "$CONFIG_DIR/G_Fplus_par_rskm.yaml" --eval \
+  2>&1 | tee "$RESULT_DIR/G_Fplus_par_rskm.log"
+
+echo ""
 echo "=============================================="
 echo "Ablation complete. Logs:"
 echo "  $RESULT_DIR/A_baseline.log"
 echo "  $RESULT_DIR/B_AplusVO.log"
+echo "  $RESULT_DIR/G_Fplus_par_rskm.log"
 echo "=============================================="

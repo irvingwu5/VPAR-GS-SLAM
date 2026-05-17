@@ -39,12 +39,16 @@ def _log_gpu_memory(slam, frame_id):
           flush=True)
 
 
-def _dpvo_process(cfg, weight_path, ht, wd, cmd_queue, result_queue):
+def _dpvo_process(cfg, weight_path, ht, wd, cmd_queue, result_queue,
+                  cuda_device_str=None):
     """Run DPVO in a dedicated subprocess (spawn context, own CUDA stream).
 
-    The parent process restricts CUDA_VISIBLE_DEVICES so only the target GPU
-    is visible.  No explicit set_device is needed — cuda:0 is the target.
+    Sets CUDA_VISIBLE_DEVICES before importing torch to restrict visibility.
     """
+
+    # Must set before any torch import (spawn context starts fresh)
+    if cuda_device_str is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_device_str
 
     from dpvo.dpvo import DPVO
     from dpvo.lietorch import SE3
@@ -133,21 +137,20 @@ class DPVOProvider:
         self.cmd_queue = ctx.Queue(maxsize=1)
         self.result_queue = ctx.Queue(maxsize=1)
 
-        # Restrict child process to only the DPVO target GPU, preventing PyTorch
-        # from creating a wasted CUDA context on the main GPU during import torch.
-        child_env = os.environ.copy()
+        # Resolve CUDA device string for child process
+        cuda_device_str = None
         cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         if cvd:
             devices = [d.strip() for d in cvd.split(",")]
             if self._dpvo_device < len(devices):
-                child_env["CUDA_VISIBLE_DEVICES"] = devices[self._dpvo_device]
+                cuda_device_str = devices[self._dpvo_device]
 
         self.process = ctx.Process(
             target=_dpvo_process,
             args=(self.dpvo_cfg, self.weight_path, self.H, self.W,
-                  self.cmd_queue, self.result_queue),
-            env=child_env,
-            daemon=True,
+                  self.cmd_queue, self.result_queue,
+                  cuda_device_str),
+            daemon=False,
         )
         self.process.start()
 
