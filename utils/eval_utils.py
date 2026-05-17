@@ -152,7 +152,7 @@ def eval_rendering(
             continue
         saved_frame_idx.append(idx)
         frame = frames[idx]
-        gt_image, _, _ = dataset[idx]
+        gt_image, gt_depth_ds, _ = dataset[idx]
 
         render_pkg = render(frame, gaussians, pipe, background)
         rendering = render_pkg["render"]
@@ -195,13 +195,19 @@ def eval_rendering(
         lpips_array.append(lpips_score.item())
 
         # Depth L1: compare rendered depth vs GT depth on valid pixels
-        if "depth" in render_pkg and frame.depth is not None:
+        if "depth" in render_pkg:
             rend_depth = render_pkg["depth"].detach()
-            gt_depth = torch.from_numpy(frame.depth.astype(np.float32)).to(rend_depth.device)
-            valid_mask = gt_depth > 0.01
-            if valid_mask.sum() > 0:
-                depth_l1 = (torch.abs(rend_depth - gt_depth) * valid_mask).sum() / valid_mask.sum()
-                depth_l1_array.append(depth_l1.item())
+            if frame.depth is not None:
+                gt_depth = torch.from_numpy(frame.depth.astype(np.float32)).to(rend_depth.device)
+            elif gt_depth_ds is not None:
+                gt_depth = torch.from_numpy(gt_depth_ds.astype(np.float32)).to(rend_depth.device)
+            else:
+                gt_depth = None
+            if gt_depth is not None:
+                valid_mask = gt_depth > 0.01
+                if valid_mask.sum() > 0:
+                    depth_l1 = (torch.abs(rend_depth - gt_depth) * valid_mask).sum() / valid_mask.sum()
+                    depth_l1_array.append(depth_l1.item())
 
     output = dict()
     output["mean_psnr"] = float(np.mean(psnr_array))
